@@ -1,23 +1,28 @@
 // Import necessary dependencies
 import { Buffer } from 'buffer';
-import generatePluginHTML from './pluginTemplate';
+import generateWorldHTML from './worldTemplate';
 import generateAuthorHTML from './authorTemplate';
 import generateSearchHTML from './searchTemplate';
 import generateHomeHTML from './homeTemplate';
 import generateRegisterHTML from './registrationTemplate';
 import generateRequestKeyRollHTML from './rollKeyTemplate';
+import generateCharacterHTML from './characterTemplate';
+import generateCharacterDirectoryHTML from './characterDirectoryTemplate';
+
 import { UserAuthDO } from './userAuthDO';
-import { PluginRegistryDO } from './PluginRegistryDO';
+import { WorldRegistryDO } from './WorldRegistryDO';
+import { CharacterRegistryDO } from './CharacterRegistryDO';
 
-import { removeAuthor, removePlugin } from './management';
+import { removeAuthor, removeWorld } from './management';
 
-export { UserAuthDO, PluginRegistryDO };
+export { UserAuthDO, WorldRegistryDO, CharacterRegistryDO };
 
 // Define CORS
 const CORS_HEADERS = {
 	'Access-Control-Allow-Origin': '*',
 	'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-	'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+	'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
+	'Access-Control-Max-Age': '86400'
 };
 
 // Main worker class
@@ -116,21 +121,19 @@ export default {
 		return await auth.fetch(request);
 	},
 
-	// The sheduled function to process download and activation queues.
 	async scheduled(controller, env, ctx) {
 		try {
-			if (!env.DOWNLOAD_COUNTS || !env.PLUGIN_REGISTRY) {
+			if (!env.VISIT_COUNTS || !env.WORLD_REGISTRY) {
 				console.error('Missing required KV namespaces');
 				return;
 			}
 
-			let updates = new Map();
-			let activations = new Map();
+			let visits = new Map();
 			let cursor = undefined;
 
-			// Process queues from KV storage
+			// Process visit queues from KV storage
 			do {
-				const result = await env.DOWNLOAD_COUNTS.list({
+				const result = await env.VISIT_COUNTS.list({
 					cursor,
 					prefix: 'queue:'
 				});
@@ -144,237 +147,41 @@ export default {
 					const parts = key.name.split(':');
 					if (parts.length < 4) continue;
 
-					const queueType = parts[1]; // 'activation' or other
 					const author = parts[2];
 					const slug = parts[3];
-					const pluginKey = `${author}:${slug}`;
+					const worldKey = `${author}:${slug}`;
 
-					// Process based on queue type
-					if (queueType === 'activation') {
-						activations.set(
-							pluginKey,
-							(activations.get(pluginKey) || 0) + 1
-						);
-					} else {
-						updates.set(
-							pluginKey,
-							(updates.get(pluginKey) || 0) + 1
-						);
-					}
+					visits.set(
+						worldKey,
+						(visits.get(worldKey) || 0) + 1
+					);
 
 					// Delete the processed key
-					await env.DOWNLOAD_COUNTS.delete(key.name)
+					await env.VISIT_COUNTS.delete(key.name)
 						.catch(err => console.error(`Error deleting key ${key.name}:`, err));
 				}
 			} while (cursor);
 
-			// Only update DO if we have changes
-			if (updates.size > 0 || activations.size > 0) {
-				const id = env.PLUGIN_REGISTRY.idFromName("global");
-				const registry = env.PLUGIN_REGISTRY.get(id);
+			// Update DO if we have changes
+			if (visits.size > 0) {
+				const id = env.WORLD_REGISTRY.idFromName("global");
+				const registry = env.WORLD_REGISTRY.get(id);
 
-				await registry.fetch(new Request('http://internal/update-counts', {
+				await registry.fetch(new Request('http://internal/update-visit-counts', {
 					method: 'POST',
 					body: JSON.stringify({
-						updates: Array.from(updates),
-						activations: Array.from(activations)
+						visits: Array.from(visits)
 					})
 				}));
 
-				console.log(`Processed ${updates.size} downloads and ${activations.size} activations`);
+				console.log(`Processed ${visits.size} world visits`);
 			}
 
 		} catch (error) {
 			console.error('Queue processing error:', error);
 			console.error('Environment state:', {
-				hasDownloadCounts: !!env?.DOWNLOAD_COUNTS,
-				hasPluginRegistry: !!env?.PLUGIN_REGISTRY
-			});
-		}
-	},
-
-	async handleDownload(request, env) {
-		try {
-			const url = new URL(request.url);
-			const author = url.searchParams.get('author');
-			const slug = url.searchParams.get('slug');
-			const track = url.searchParams.get('track') !== 'false';
-
-			if (!author || !slug) {
-				return new Response(JSON.stringify({
-					error: 'Missing author or slug parameter'
-				}), {
-					status: 400,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-
-			if (track) {
-				// Rate limiting logic stays the same
-				const clientIP = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Client-IP');
-				const rateLimitKey = `ratelimit:${clientIP}:${author}:${slug}`;
-				const currentTime = Date.now();
-
-				const rateLimitData = await env.DOWNLOAD_RATELIMIT.get(rateLimitKey);
-				if (rateLimitData) {
-					const { timestamp, count } = JSON.parse(rateLimitData);
-					if (currentTime - timestamp < 3600000 && count >= 5) {
-						return new Response(JSON.stringify({
-							error: 'Rate limit exceeded. Please try again later.'
-						}), {
-							status: 429,
-							headers: {
-								...CORS_HEADERS,
-								'Content-Type': 'application/json',
-								'Retry-After': '3600'
-							}
-						});
-					}
-
-					if (currentTime - timestamp < 3600000) {
-						await env.DOWNLOAD_RATELIMIT.put(rateLimitKey, JSON.stringify({
-							timestamp,
-							count: count + 1
-						}), { expirationTtl: 3600 });
-					} else {
-						await env.DOWNLOAD_RATELIMIT.put(rateLimitKey, JSON.stringify({
-							timestamp: currentTime,
-							count: 1
-						}), { expirationTtl: 3600 });
-					}
-				} else {
-					await env.DOWNLOAD_RATELIMIT.put(rateLimitKey, JSON.stringify({
-						timestamp: currentTime,
-						count: 1
-					}), { expirationTtl: 3600 });
-				}
-
-				// Record download in KV store
-				const downloadKey = `downloads:${author}:${slug}`;
-				const queueKey = `download_queue:${author}:${slug}:${Date.now()}`;
-
-				// Add to download queue with 1 hour expiration
-				await env.DOWNLOAD_QUEUE.put(queueKey, '1', {
-					expirationTtl: 3600
-				});
-
-				// Update running total in KV...maybe remove this soon.
-				const currentCount = parseInt(await env.DOWNLOAD_COUNTS.get(downloadKey)) || 0;
-				await env.DOWNLOAD_COUNTS.put(downloadKey, (currentCount + 1).toString());
-			}
-
-			// Get and return the zip file
-			const zipKey = `${author}/${slug}/${slug}.zip`;
-			const zipObject = await env.PLUGIN_BUCKET.get(zipKey);
-
-			if (!zipObject) {
-				return new Response(JSON.stringify({ error: 'Plugin not found' }), {
-					status: 404,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-
-			return new Response(zipObject.body, {
-				status: 200,
-				headers: {
-					...CORS_HEADERS,
-					'Content-Type': 'application/zip',
-					'Content-Disposition': `attachment; filename="${slug}.zip"`
-				}
-			});
-		} catch (error) {
-			console.error('Download error:', error);
-			return new Response(JSON.stringify({
-				error: 'Internal server error',
-				details: error.message
-			}), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-			});
-		}
-	},
-	async getDownloadCount(request, env) {
-		try {
-			const url = new URL(request.url);
-			const author = url.searchParams.get('author');
-			const slug = url.searchParams.get('slug');
-
-			if (!author || !slug) {
-				return new Response(JSON.stringify({ error: 'Missing author or slug parameter' }), {
-					status: 400,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-				});
-			}
-
-			const downloadKey = `downloads:${author}:${slug}`;
-			const count = parseInt(await env.DOWNLOAD_COUNTS.get(downloadKey)) || 0;
-
-			return new Response(JSON.stringify({ downloads: count }), {
-				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		} catch (error) {
-			console.error('Get download count error:', error);
-			return new Response(JSON.stringify({ error: 'Internal server error', details: error.message }), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		}
-	},
-
-	// Handle GET /plugin-data
-	async handleGetPluginData(request, env) {
-		try {
-			const url = new URL(request.url);
-			const author = url.searchParams.get('author');
-			const slug = url.searchParams.get('slug');
-
-			if (!author || !slug) {
-				return new Response(JSON.stringify({ error: 'Missing author or slug parameter' }), {
-					status: 400,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-				});
-			}
-
-			//if api key is valid bust the cache
-			if (this.authenticateRequest(request, env)) {
-				const cache = caches.default;
-				await cache.delete(request);
-			}
-
-			// Check cache first
-			const cacheKey = `plugin-data:${author}:${slug}`;
-			const cache = caches.default;
-			let response = await cache.match(request);
-
-			if (!response) {
-				const jsonKey = `${author}/${slug}/${slug}.json`;
-				const jsonObject = await env.PLUGIN_BUCKET.get(jsonKey);
-
-				if (!jsonObject) {
-					return new Response(JSON.stringify({ error: 'Plugin not found' }), {
-						status: 404,
-						headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-					});
-				}
-
-				const jsonData = await jsonObject.text();
-				response = new Response(jsonData, {
-					status: 200,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-				});
-
-				// Cache the response
-				response.headers.set('Cache-Control', 'public, max-age=3600');
-				await cache.put(request, response.clone());
-			}
-
-			return response;
-		} catch (error) {
-			console.error('Get plugin data error:', error);
-			return new Response(JSON.stringify({ error: 'Internal server error', details: error.message }), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+				hasVisitCounts: !!env?.VISIT_COUNTS,
+				hasWorldRegistry: !!env?.WORLD_REGISTRY
 			});
 		}
 	},
@@ -407,11 +214,11 @@ export default {
 					});
 				}
 
-				const plugins = await this.fetchAuthorPlugins(author, env);
+				const worlds = await this.fetchAuthorWorlds(author, env);
 
 				const responseData = {
 					...authorData,
-					plugins,
+					worlds,
 				};
 
 				response = new Response(JSON.stringify(responseData), {
@@ -443,26 +250,26 @@ export default {
 			let response = await cache.match(cacheKey);
 
 			if (!response) {
-				const list = await env.PLUGIN_BUCKET.list();
+				const list = await env.WORLD_BUCKET.list();
 				const authors = [];
 
 				for (const item of list.objects) {
 					const parts = item.key.split('/');
 					if (parts.length > 1 && parts[1] === 'author_info.json') {
 						const authorInfoKey = item.key;
-						const authorInfoObject = await env.PLUGIN_BUCKET.get(authorInfoKey);
+						const authorInfoObject = await env.WORLD_BUCKET.get(authorInfoKey);
 
 						if (authorInfoObject) {
 							const authorData = JSON.parse(await authorInfoObject.text());
 							authorData.authorId = parts[0];
 
 							const authorPrefix = `${parts[0]}/`;
-							const pluginsList = await env.PLUGIN_BUCKET.list({ prefix: authorPrefix });
-							const pluginCount = pluginsList.objects.filter(obj => obj.key.endsWith('.json') && !obj.key.endsWith('author_info.json')).length;
+							const worldsList = await env.WORLD_BUCKET.list({ prefix: authorPrefix });
+							const worldCount = worldsList.objects.filter(obj => obj.key.endsWith('.json') && !obj.key.endsWith('author_info.json')).length;
 
 							authors.push({
 								...authorData,
-								plugin_count: pluginCount
+								world_count: worldCount
 							});
 						}
 					}
@@ -488,330 +295,13 @@ export default {
 		}
 	},
 
-	// Handle POST /upload-chunk
-	async handlePluginUploadChunk(request, env) {
-		try {
-			const { userId, pluginName, fileData, chunkNumber, totalChunks } = await request.json();
-
-			// Get API key from Authorization header
-			const authHeader = request.headers.get('Authorization');
-			if (!authHeader) {
-				return new Response(JSON.stringify({
-					error: 'Missing Authorization header'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-			const [, apiKey] = authHeader.split(' ');
-
-			// Verify API key and username match
-			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
-			if (!isValid) {
-				return new Response(JSON.stringify({
-					error: 'Unauthorized: Invalid API key or username mismatch'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-			console.log(`Received chunk ${chunkNumber} of ${totalChunks} for plugin ${pluginName}`);
-
-			const sanitizedPluginName = pluginName.replace(/\s/g, '-');
-			const folderName = `${userId}`;
-			const chunkKey = `${folderName}/chunks_${sanitizedPluginName}/${sanitizedPluginName}_chunk_${chunkNumber}_${totalChunks}`;
-
-			const chunkBuffer = Buffer.from(fileData, 'base64');
-			await env.PLUGIN_BUCKET.put(chunkKey, chunkBuffer, {
-				httpMetadata: {
-					contentType: 'application/octet-stream',
-				},
-			});
-
-			console.log(`Successfully stored chunk ${chunkNumber}`);
-
-			return new Response(JSON.stringify({ success: true, message: 'Chunk uploaded successfully' }), {
-				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		} catch (error) {
-			console.error('Chunk upload error:', error);
-			return new Response(JSON.stringify({
-				error: 'Internal server error',
-				details: error.message
-			}), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-			});
-		}
-	},
-
-	// Handle POST /upload-json
-	async handleUploadJson(request, env) {
-		try {
-			const { userId, pluginName, jsonData } = await request.json();
-			// Get API key from Authorization header
-			const authHeader = request.headers.get('Authorization');
-			if (!authHeader) {
-				return new Response(JSON.stringify({
-					error: 'Missing Authorization header'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-			const [, apiKey] = authHeader.split(' ');
-
-			// Verify API key and username match
-			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
-			if (!isValid) {
-				return new Response(JSON.stringify({
-					error: 'Unauthorized: Invalid API key or username mismatch'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-
-			const sanitizedPluginName = pluginName.replace(/\s/g, '-');
-			const folderName = `${userId}`;
-			const jsonKey = `${folderName}/${sanitizedPluginName}/${sanitizedPluginName}.json`;
-
-			// Ensure jsonData is the correct structure
-			let processedJsonData = jsonData;
-			if (typeof jsonData === 'string') {
-				processedJsonData = JSON.parse(jsonData);
-			}
-
-			// If it's not an array or it has a "0" key, correct the structure
-			if (!Array.isArray(processedJsonData) || processedJsonData[0] && '0' in processedJsonData[0]) {
-				processedJsonData = [processedJsonData['0'] || processedJsonData];
-			}
-
-			// Remove any unwanted outer properties
-			if (processedJsonData[0].pluginName) delete processedJsonData[0].pluginName;
-			if (processedJsonData[0].authorInfo) delete processedJsonData[0].authorInfo;
-
-			await env.PLUGIN_BUCKET.put(jsonKey, JSON.stringify(processedJsonData), {
-				httpMetadata: {
-					contentType: 'application/json',
-				},
-			});
-
-			return new Response(JSON.stringify({ success: true, message: 'JSON uploaded successfully' }), {
-				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		} catch (error) {
-			console.error('JSON upload error:', error);
-			return new Response(JSON.stringify({
-				error: 'Internal server error',
-				details: error.message
-			}), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-			});
-		}
-	},
-
-	// Handle POST /finalize-upload
-	async handleFinalizeUpload(request, env) {
-		try {
-			const { userId, pluginName, metadata } = await request.json();
-
-			// Get API key from Authorization header
-			const authHeader = request.headers.get('Authorization');
-			if (!authHeader) {
-				return new Response(JSON.stringify({
-					error: 'Missing Authorization header'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-			const [, apiKey] = authHeader.split(' ');
-
-			// Verify API key and username match
-			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
-			if (!isValid) {
-				return new Response(JSON.stringify({
-					error: 'Unauthorized: Invalid API key or username mismatch'
-				}), {
-					status: 401,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-				});
-			}
-			const cache = caches.default;
-
-			console.log(`Finalizing upload for plugin: ${pluginName}`);
-
-			const sanitizedPluginName = pluginName.replace(/\s/g, '-');
-			const folderName = `${userId}`;
-			const objectKey = `${folderName}/${sanitizedPluginName}/${sanitizedPluginName}.zip`;
-
-			const firstChunkKey = `${folderName}/chunks_${sanitizedPluginName}/${sanitizedPluginName}_chunk_1_`;
-			const firstChunkList = await env.PLUGIN_BUCKET.list({ prefix: firstChunkKey });
-			if (firstChunkList.objects.length === 0) {
-				throw new Error('No chunks found');
-			}
-			const firstChunkObject = firstChunkList.objects[0];
-			const totalChunks = parseInt(firstChunkObject.key.split('_').pop());
-
-			console.log(`Combining ${totalChunks} chunks`);
-
-			const chunks = [];
-			let totalSize = 0;
-
-			for (let chunkNumber = 1; chunkNumber <= totalChunks; chunkNumber++) {
-				const chunkKey = `${folderName}/chunks_${sanitizedPluginName}/${sanitizedPluginName}_chunk_${chunkNumber}_${totalChunks}`;
-				const chunkObject = await env.PLUGIN_BUCKET.get(chunkKey);
-
-				if (!chunkObject) {
-					throw new Error(`Chunk ${chunkNumber} not found`);
-				}
-
-				const chunkData = await chunkObject.arrayBuffer();
-				console.log(`Processing chunk ${chunkNumber} of size ${chunkData.byteLength}`);
-				chunks.push(new Uint8Array(chunkData));
-				totalSize += chunkData.byteLength;
-
-				await env.PLUGIN_BUCKET.delete(chunkKey);
-			}
-
-			console.log(`Total size of all chunks: ${totalSize}`);
-
-			const fileBuffer = new Uint8Array(totalSize);
-			let offset = 0;
-			for (const chunk of chunks) {
-				fileBuffer.set(chunk, offset);
-				offset += chunk.length;
-			}
-
-			await env.PLUGIN_BUCKET.put(objectKey, fileBuffer, {
-				httpMetadata: {
-					contentType: 'application/zip',
-				},
-			});
-
-			console.log('Successfully combined chunks and stored ZIP file');
-
-			// Fetch author info
-			const authorInfoKey = `${userId}/author_info.json`;
-			const authorInfoObject = await env.PLUGIN_BUCKET.get(authorInfoKey);
-			let authorInfo = {};
-			if (authorInfoObject) {
-				authorInfo = JSON.parse(await authorInfoObject.text());
-			}
-
-			if (authorInfo) {
-				// Get DO instance
-				const id = env.PLUGIN_REGISTRY.idFromName("global");
-				const registry = env.PLUGIN_REGISTRY.get(id);
-
-				// Sync author data
-				await registry.fetch(new Request('http://internal/sync-author', {
-					method: 'POST',
-					body: JSON.stringify(authorInfo)
-				}));
-			}
-
-			// Ensure metadata is in the correct format
-			let finalMetadata = metadata;
-			if (!Array.isArray(finalMetadata)) {
-				finalMetadata = [finalMetadata];
-			}
-			if (finalMetadata[0] && '0' in finalMetadata[0]) {
-				finalMetadata = [finalMetadata[0]['0']];
-			}
-
-			// Update the contributors field with author info
-			if (finalMetadata[0] && finalMetadata[0].contributors) {
-				const authorUsername = Object.keys(finalMetadata[0].contributors)[0];
-				finalMetadata[0].contributors[authorUsername] = {
-					profile: authorInfo.website || `https://app.xr.foundation/plugins/${userId}`,
-					avatar: authorInfo.avatar_url || '',
-					display_name: authorInfo.username || authorUsername
-				};
-			}
-
-			// After successfully storing metadata in R2
-			const metadataKey = `${userId}/${pluginName}/${pluginName}.json`;
-			await env.PLUGIN_BUCKET.put(metadataKey, JSON.stringify(finalMetadata), {
-				httpMetadata: {
-					contentType: 'application/json',
-				},
-			});
-
-			// Update SQLite database
-			const pluginInfo = finalMetadata[0];
-
-			// Get DO instance to update SQLite
-			const id = env.PLUGIN_REGISTRY.idFromName("global");
-			const registry = env.PLUGIN_REGISTRY.get(id);
-
-			const updateRequest = new Request('http://internal/migrate-data', {
-				method: 'POST',
-				body: JSON.stringify({
-					author: userId,
-					slug: sanitizedPluginName,
-					jsonKey: metadataKey
-				})
-			});
-
-			const updateResponse = await registry.fetch(updateRequest);
-			if (!updateResponse.ok) {
-				console.error('Failed to update SQLite database:', await updateResponse.text());
-			}
-
-			const zipUrl = `${objectKey}`;
-			const metadataUrl = `${metadataKey}`;
-
-			// Bust plugin directory cache
-			await cache.delete(`https://${request.headers.get('host')}/directory/${userId}/${sanitizedPluginName}`);
-
-			// Bust plugin data cache
-			await cache.delete(`https://${request.headers.get('host')}/plugin-data?author=${userId}&slug=${sanitizedPluginName}`);
-
-			// Bust author directory cache
-			await cache.delete(`https://${request.headers.get('host')}/author/${userId}`);
-
-			// Bust author data cache
-			await cache.delete(`https://${request.headers.get('host')}/author-data?author=${userId}`);
-
-			// Bust authors list cache
-			await cache.delete(`https://${request.headers.get('host')}/authors-list`);
-
-			console.log(`Cache busted for plugin ${pluginName} and author ${userId}`);
-
-
-			return new Response(JSON.stringify({
-				success: true,
-				message: 'Plugin uploaded successfully',
-				zipUrl,
-				metadataUrl
-			}), {
-				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		} catch (error) {
-			console.error('Finalize upload error:', error);
-			return new Response(JSON.stringify({
-				error: 'Internal server error',
-				details: error.message
-			}), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-			});
-		}
-	},
-
 	// Handle POST /update-author-info
 	async handleUpdateAuthorInfo(request, env) {
 		try {
-			const { userId, pluginName, authorData } = await request.json();
+			const { userId, worldName, authorData } = await request.json();
 
-			if (!userId || !pluginName || !authorData) {
-				return new Response(JSON.stringify({ error: `Missing userId, pluginName, or authorData received ${userId}, ${pluginName}, ${authorData}` }), {
+			if (!userId || !worldName || !authorData) {
+				return new Response(JSON.stringify({ error: `Missing userId, worldName, or authorData received ${userId}, ${worldName}, ${authorData}` }), {
 					status: 400,
 					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
 				});
@@ -825,7 +315,7 @@ export default {
 
 			const authorInfoKey = `${userId}/author_info.json`;
 
-			await env.PLUGIN_BUCKET.put(authorInfoKey, JSON.stringify(parsedAuthorData, null, 2), {
+			await env.WORLD_BUCKET.put(authorInfoKey, JSON.stringify(parsedAuthorData, null, 2), {
 				httpMetadata: {
 					contentType: 'application/json',
 				},
@@ -861,7 +351,7 @@ export default {
 	// Handle POST /upload-asset
 	async handleUploadAsset(request, env) {
 		try {
-			const { userId, pluginName, fileName, fileData, assetType } = await request.json();
+			const { userId, worldName, fileName, fileData, assetType } = await request.json();
 
 			// Get API key from Authorization header
 			const authHeader = request.headers.get('Authorization');
@@ -886,30 +376,27 @@ export default {
 				});
 			}
 
-			console.log(`Received ${assetType} for plugin: ${pluginName}`);
-
-			const sanitizedPluginName = pluginName.replace(/\s/g, '-');
+			console.log(`Received ${assetType} for world: ${worldName}`);
+			const sanitizedWorldName = worldName.replace(/\s/g, '-');
 			const folderName = `${userId}`;
-			const assetKey = `${folderName}/${sanitizedPluginName}/${fileName}`;
+			const assetKey = `${folderName}/${sanitizedWorldName}/${fileName}`;
 
 			const assetBuffer = Buffer.from(fileData, 'base64');
-			await env.PLUGIN_BUCKET.put(assetKey, assetBuffer, {
+			await env.WORLD_BUCKET.put(assetKey, assetBuffer, {
 				httpMetadata: {
-					contentType: 'image/jpeg',
+					contentType: 'image/jpeg', // Consider making this dynamic based on file type
 				},
 			});
 
 			console.log(`Successfully stored ${assetType}`);
 
-			const assetUrl = `${assetKey}`;
-
 			return new Response(JSON.stringify({
 				success: true,
 				message: `${assetType} uploaded successfully`,
-				assetUrl
+				assetUrl: assetKey
 			}), {
 				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+				headers: { ...CORS_HEADERS }
 			});
 		} catch (error) {
 			console.error('Asset upload error:', error);
@@ -918,7 +405,7 @@ export default {
 				details: error.message
 			}), {
 				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				headers: { ...CORS_HEADERS }
 			});
 		}
 	},
@@ -928,7 +415,7 @@ export default {
 		const authorInfoKey = `${author}/author_info.json`;
 		console.log(`Fetching author data for ${author} ${authorInfoKey}`);
 		try {
-			const authorInfoObject = await env.PLUGIN_BUCKET.get(authorInfoKey);
+			const authorInfoObject = await env.WORLD_BUCKET.get(authorInfoKey);
 			if (!authorInfoObject) {
 				console.error(`Author info not found for ${author}`);
 				return null;
@@ -941,37 +428,35 @@ export default {
 		}
 	},
 
-	// Helper function to fetch author plugins
-	async fetchAuthorPlugins(author, env) {
+	// Helper function to fetch author worlds.
+	async fetchAuthorWorlds(author, env) {
 		const prefix = `${author}/`;
-		const list = await env.PLUGIN_BUCKET.list({ prefix });
-
-		const plugins = [];
+		const list = await env.WORLD_BUCKET.list({ prefix });
+		const worlds = []; // Changed from plugins array
 
 		for (const item of list.objects) {
 			const parts = item.key.split('/');
-			if (parts.length === 3 && parts[2] === `${parts[1]}.json`) {
-				const jsonData = await env.PLUGIN_BUCKET.get(item.key);
-				const pluginData = JSON.parse(await jsonData.text());
+			if (parts.length === 3 && parts[2] === 'metadata.json') { // Changed from ${parts[1]}.json
+				const jsonData = await env.WORLD_BUCKET.get(item.key);
+				const worldData = JSON.parse(await jsonData.text());
 
-				plugins.push({
-					slug: pluginData[0].slug,
-					name: pluginData[0].name,
-					short_description: pluginData[0].short_description,
-					icons: pluginData[0].icons,
-					banner: pluginData[0].banner,
-					tags: pluginData[0].tags,
-					version: pluginData[0].version,
-					rating: pluginData[0].rating || 0,
-					active_installs: pluginData[0].active_installs || 0,
+				worlds.push({
+					slug: worldData.slug,
+					name: worldData.name,
+					short_description: worldData.short_description,
+					preview_image: worldData.preview_image, // Changed from icons
+					tags: worldData.tags,
+					version: worldData.version,
+					visit_count: worldData.visit_count || 0, // Changed from rating
+					active_users: worldData.active_users || 0 // Changed from active_installs
 				});
 			}
 		}
 
-		return plugins;
+		return worlds;
 	},
 
-	async handleGetPluginDirectory(request, env) {
+	async handleGetWorldDirectory(request, env) {
 		const url = new URL(request.url);
 		const pathParts = url.pathname.split('/').filter(part => part !== '');
 
@@ -980,30 +465,37 @@ export default {
 		}
 
 		const author = pathParts[1];
-		const slug = pathParts[2];
+		const world = pathParts[2];
 
 		// Check cache first
-		const cacheKey = `plugin:${author}:${slug}`;
+		const cacheKey = `world:${author}:${world}`;
 		const cache = caches.default;
 		let response = await cache.match(request);
 
 		if (!response) {
 			try {
-				const pluginData = await this.fetchPluginData(author, slug, env);
+				const worldData = await this.fetchWorldData(author, world, env);
 				const authorData = await this.fetchAuthorData(author, env);
 
-				if (!pluginData) {
-					return new Response('Plugin not found', { status: 404 });
+				if (!worldData) {
+					return new Response('World not found', { status: 404 });
 				}
+				console.log("worldData", JSON.stringify(worldData));
+				// world_url is antpb/Scene/Scene.html, we need to use the asset directory of http://xrpassets.sxp.digital/antpb/Scene/Scene.html
+				worldData.asset_directory = `http://xrpassets.sxp.digital/${author}/${world}/`;
+				// pull html content and include it as a stringified object in the worldData named `world_html`
+				const htmlKey = `${author}/${world}/${world}.html`;
+				const htmlObject = await env.WORLD_BUCKET.get(htmlKey);
+				worldData.html_content = await htmlObject.text();
 
-				pluginData.authorData = authorData;
-				response = await generatePluginHTML(pluginData, env);
+				worldData.authorData = authorData;
+				response = await generateWorldHTML(worldData, env);
 
 				// Cache the response
 				response.headers.set('Cache-Control', 'public, max-age=3600');
 				await cache.put(request, response.clone());
 			} catch (error) {
-				console.error('Error generating plugin page:', error);
+				console.error('Error generating world page:', error);
 				return new Response('Internal Server Error', { status: 500 });
 			}
 		}
@@ -1046,12 +538,14 @@ export default {
 		return response;
 	},
 
-	async fetchPluginData(author, slug, env) {
-		const jsonKey = `${author}/${slug}/${slug}.json`;
-		const jsonObject = await env.PLUGIN_BUCKET.get(jsonKey);
+	async fetchWorldData(author, slug, env) {
+		// remove .html from slug
+		slug = slug.replace('.html', '');
+		const jsonKey = `${author}/${slug}/metadata.json`;
+		const jsonObject = await env.WORLD_BUCKET.get(jsonKey);
 
 		if (!jsonObject) {
-			console.error(`Plugin data not found for ${jsonKey}`);
+			console.error(`World data not found for ${jsonKey}`);
 			return null;
 		}
 
@@ -1068,7 +562,7 @@ export default {
 
 	async fetchAuthorPageData(author, env) {
 		const authorInfoKey = `${author}/author_info.json`;
-		const authorInfoObject = await env.PLUGIN_BUCKET.get(authorInfoKey);
+		const authorInfoObject = await env.WORLD_BUCKET.get(authorInfoKey);
 		// stringify and log the authorInfoObject
 		if (!authorInfoObject) {
 			console.error(`Author info not found for ${author}`);
@@ -1080,27 +574,27 @@ export default {
 
 			const authorData = JSON.parse(authorInfoText);
 
-			// Fetch and combine plugin data
-			const pluginPrefix = `${author}/`;
-			const pluginList = await env.PLUGIN_BUCKET.list({ prefix: pluginPrefix });
+			// Fetch and combine world data
+			const worldPrefix = `${author}/`;
+			const worldList = await env.WORLD_BUCKET.list({ prefix: worldPrefix });
 
-			const plugins = [];
+			const worlds = [];
 
-			for (const item of pluginList.objects) {
+			for (const item of worldList.objects) {
 				// log 
 				const parts = item.key.split('/');
-				if (parts.length === 3 && parts[2] === `${parts[1]}.json`) {
-					const jsonData = await env.PLUGIN_BUCKET.get(item.key);
-					const pluginData = JSON.parse(await jsonData.text());
-					// Preserve the original structure of the plugin data
-					plugins.push({
-						...pluginData[0],
+				if (parts.length === 3 && parts[2] === `metadata.json`) {
+					const jsonData = await env.WORLD_BUCKET.get(item.key);
+					const worldData = JSON.parse(await jsonData.text());
+					// Preserve the original structure of the world data
+					worlds.push({
+						...worldData[0],
 					});
 				}
 			}
 
-			// Replace the plugins array in authorData
-			authorData.plugins = plugins;
+			// Replace the worlds array in authorData
+			authorData.worlds = worlds;
 
 			return authorData;
 		} catch (error) {
@@ -1113,19 +607,19 @@ export default {
 		try {
 			const url = new URL(request.url);
 			const author = url.searchParams.get('author');
-			const pluginName = url.searchParams.get('pluginName');
+			const worldName = url.searchParams.get('worldName');
 			const newVersion = url.searchParams.get('newVersion');
 
-			if (!author || !pluginName || !newVersion) {
+			if (!author || !worldName || !newVersion) {
 				return new Response(JSON.stringify({ error: 'Missing required parameters' }), {
 					status: 400,
 					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
 				});
 			}
 
-			const sanitizedPluginName = pluginName.replace(/\s/g, '-');
-			const jsonKey = `${author}/${sanitizedPluginName}/${sanitizedPluginName}.json`;
-			const jsonObject = await env.PLUGIN_BUCKET.get(jsonKey);
+			const sanitizedWorldName = worldName.replace(/\s/g, '-');
+			const jsonKey = `${author}/${sanitizedWorldName}/metadata.json`;
+			const jsonObject = await env.WORLD_BUCKET.get(jsonKey);
 
 			if (!jsonObject) {
 				return new Response(JSON.stringify({ isNew: true, canUpload: true }), {
@@ -1172,7 +666,7 @@ export default {
 		return false; // versions are equal
 	},
 
-	async handleBackupPlugin(request, env) {
+	async handleBackupWorld(request, env) {
 		try {
 			if (!this.authenticateRequest(request, env)) {
 				return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -1190,11 +684,11 @@ export default {
 				});
 			}
 
-			const pluginFolder = `${author}/${slug}`;
-			const backupFolder = `${pluginFolder}/${version}`;
+			const worldFolder = `${author}/${slug}`;
+			const backupFolder = `${worldFolder}/${version}`;
 
 			// Check if backup already exists
-			const existingBackup = await env.PLUGIN_BUCKET.list({ prefix: backupFolder });
+			const existingBackup = await env.WORLD_BUCKET.list({ prefix: backupFolder });
 			if (existingBackup.objects.length > 0) {
 				return new Response(JSON.stringify({
 					success: false,
@@ -1207,32 +701,31 @@ export default {
 
 			// Files to backup
 			const filesToBackup = [
-				`${slug}.json`,
-				`${slug}.zip`,
-				'banner-1500x620.jpg',
-				'icon-256x256.jpg'
+				`${slug}.html`,           // Changed from .zip
+				`metadata.json`,          // Changed from metadata.json
+				'preview.jpg',            // Changed from banner/icon
 			];
 
 			for (const file of filesToBackup) {
-				const sourceKey = `${pluginFolder}/${file}`;
-				const sourceObject = await env.PLUGIN_BUCKET.get(sourceKey);
+				const sourceKey = `${worldFolder}/${file}`;
+				const sourceObject = await env.WORLD_BUCKET.get(sourceKey);
 
 				if (sourceObject) {
 					const destinationKey = `${backupFolder}/${file}`;
-					await env.PLUGIN_BUCKET.put(destinationKey, sourceObject.body, sourceObject.httpMetadata);
+					await env.WORLD_BUCKET.put(destinationKey, sourceObject.body, sourceObject.httpMetadata);
 					console.log(`Backed up ${file} to ${destinationKey}`);
 				} else {
 					console.log(`File ${file} not found, skipping backup`);
 				}
 			}
 
-			// Update the main plugin metadata to reflect the current version
-			const metadataKey = `${pluginFolder}/${slug}.json`;
-			const metadataObject = await env.PLUGIN_BUCKET.get(metadataKey);
+			// Update the main world metadata to reflect the current version
+			const metadataKey = `${worldFolder}/metadata.json`;
+			const metadataObject = await env.WORLD_BUCKET.get(metadataKey);
 			if (metadataObject) {
 				const metadata = JSON.parse(await metadataObject.text());
 				metadata[0].version = version;
-				await env.PLUGIN_BUCKET.put(metadataKey, JSON.stringify(metadata), {
+				await env.WORLD_BUCKET.put(metadataKey, JSON.stringify(metadata), {
 					httpMetadata: { contentType: 'application/json' },
 				});
 			}
@@ -1262,8 +755,8 @@ export default {
 		const offset = parseInt(url.searchParams.get('offset') || '0');
 
 		// Get DO instance
-		const id = env.PLUGIN_REGISTRY.idFromName("global");
-		const registry = env.PLUGIN_REGISTRY.get(id);
+		const id = env.WORLD_REGISTRY.idFromName("global");
+		const registry = env.WORLD_REGISTRY.get(id);
 
 		// Create internal search request
 		const searchRequest = new Request('http://internal/search', {
@@ -1292,45 +785,7 @@ export default {
 			return new Response('Internal Server Error', { status: 500 });
 		}
 	},
-
-	async handleActivation(request, env) {
-		try {
-			const url = new URL(request.url);
-			const author = url.searchParams.get('author');
-			const slug = url.searchParams.get('slug');
-
-			if (!author || !slug) {
-				return new Response(JSON.stringify({ error: 'Missing required parameters' }), {
-					status: 400,
-					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-				});
-			}
-
-			const queueKey = `queue:activation:${author}:${slug}:${Date.now()}`;
-
-			// Add to queue with 1 hour expiration
-			await env.DOWNLOAD_COUNTS.put(queueKey, '1', {
-				expirationTtl: 3600
-			});
-
-			return new Response(JSON.stringify({
-				success: true,
-				message: 'Activation message queued. Thanks for using the plugin! This ping helps us anonymously track the number of activated installs.'
-			}), {
-				status: 200,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-
-		} catch (error) {
-			console.error('Activation tracking error:', error);
-			return new Response(JSON.stringify({ error: 'Internal server error', details: error.message }), {
-				status: 500,
-				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-			});
-		}
-	},
-
-	async getActivationCount(request, env) {
+	async getVisitCount(request, env) {
 		try {
 			const url = new URL(request.url);
 			const author = url.searchParams.get('author');
@@ -1343,15 +798,15 @@ export default {
 				});
 			}
 
-			const activationKey = `activations:${author}:${slug}`;
-			const count = parseInt(await env.DOWNLOAD_COUNTS.get(activationKey)) || 0;
+			const visitsKey = `visits:${author}:${slug}`;
+			const count = parseInt(await env.VISIT_COUNTS.get(visitsKey)) || 0;
 
-			return new Response(JSON.stringify({ activations: count }), {
+			return new Response(JSON.stringify({ visits: count }), {
 				status: 200,
 				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
 			});
 		} catch (error) {
-			console.error('Get activation count error:', error);
+			console.error('Get visit count error:', error);
 			return new Response(JSON.stringify({ error: 'Internal server error', details: error.message }), {
 				status: 500,
 				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -1367,8 +822,8 @@ export default {
 
 			if (!response) {
 				// Get DO instance
-				const id = env.PLUGIN_REGISTRY.idFromName("global");
-				const registry = env.PLUGIN_REGISTRY.get(id);
+				const id = env.WORLD_REGISTRY.idFromName("global");
+				const registry = env.WORLD_REGISTRY.get(id);
 
 				// Fetch authors from database
 				const authorsRequest = new Request('http://internal/list-authors', {
@@ -1411,25 +866,28 @@ export default {
 			// List of all domains to clear cache for
 			const domains = [
 				request.headers.get('host'),
-				'pluginpublisher.com' // Replace with your configured domain.
-				// Add any other domains here
+				'pluginpublisher.com',
+				'xr-publisher.sxpdigital.workers.dev'
 			];
 
 			// List of URL patterns to clear
 			const urlPatterns = [
 				`/`,
 				`/directory/*`,
-				`/plugin-data*`,
+				`/world-data*`,
 				`/author/*`,
 				`/author-data*`,
 				`/authors-list`,
-				`/directory/search*`
+				`/directory/search*`,
+				`/characters/*`,
+				`/character-data*`,
+				`/author-characters*`
 			];
 
 			const clearedKeys = [];
 
 			// Get list of all authors to ensure we clear their specific caches
-			const authorsList = await env.PLUGIN_BUCKET.list();
+			const authorsList = await env.WORLD_BUCKET.list();
 			const authors = new Set();
 			for (const item of authorsList.objects) {
 				const parts = item.key.split('/');
@@ -1458,17 +916,17 @@ export default {
 
 							// If it's a directory pattern, also clear plugin-specific caches
 							if (pattern.startsWith('/directory/')) {
-								const pluginsList = await env.PLUGIN_BUCKET.list({ prefix: `${author}/` });
-								for (const plugin of pluginsList.objects) {
-									const pluginParts = plugin.key.split('/');
-									if (pluginParts.length === 3 && pluginParts[2].endsWith('.json')) {
-										const pluginSlug = pluginParts[1];
-										const httpsPluginUrl = `https://${domain}/directory/${author}/${pluginSlug}`;
-										const httpPluginUrl = `http://${domain}/directory/${author}/${pluginSlug}`;
+								const worldsList = await env.WORLD_BUCKET.list({ prefix: `${author}/` });
+								for (const world of worldsList.objects) {
+									const worldParts = world.key.split('/');
+									if (worldParts.length === 3 && worldParts[2].endsWith('.json')) {
+										const worldFinalName = worldParts[1];
+										const httpsWorldUrl = `https://${domain}/directory/${author}/${worldFinalName}`;
+										const httpWorldUrl = `http://${domain}/directory/${author}/${worldFinalName}`;
 
-										await cache.delete(httpsPluginUrl);
-										await cache.delete(httpPluginUrl);
-										clearedKeys.push(httpsPluginUrl, httpPluginUrl);
+										await cache.delete(httpsWorldUrl);
+										await cache.delete(httpWorldUrl);
+										clearedKeys.push(httpsWorldUrl, httpWorldUrl);
 									}
 								}
 							}
@@ -1515,15 +973,15 @@ export default {
 			// List of all domains to clear cache for
 			const domains = [
 				request.headers.get('host'),
-				'pluginpublisher.com'
-				// Add any other domains here
+				'pluginpublisher.com',
+				'xr-publisher.sxpdigital.workers.dev'
 			];
 
 			// List of URL patterns to clear
 			const urlPatterns = [
 				`/`,
 				`/directory/*`,
-				`/plugin-data*`,
+				`/world-data*`,
 				`/author/*`,
 				`/author-data*`,
 				`/authors-list`,
@@ -1533,7 +991,7 @@ export default {
 			const clearedKeys = [];
 
 			// Get list of all authors to ensure we clear their specific caches
-			const authorsList = await env.PLUGIN_BUCKET.list();
+			const authorsList = await env.WORLD_BUCKET.list();
 			const authors = new Set();
 			for (const item of authorsList.objects) {
 				const parts = item.key.split('/');
@@ -1548,9 +1006,7 @@ export default {
 					if (pattern.includes('*')) {
 						// For wildcard patterns, we need to specifically clear author-related caches
 						for (const author of authors) {
-							const specificUrl = pattern
-								.replace('*', `${author}`)
-								.replace('//', '/');
+							const specificUrl = pattern.replace('*', `${author}`).replace('//', '/');
 
 							// Clear both HTTP and HTTPS versions
 							const httpsKey = `https://${domain}${specificUrl}`;
@@ -1560,19 +1016,19 @@ export default {
 							await cache.delete(httpKey);
 							clearedKeys.push(httpsKey, httpKey);
 
-							// If it's a directory pattern, also clear plugin-specific caches
+							// If it's a directory pattern, also clear world-specific caches
 							if (pattern.startsWith('/directory/')) {
-								const pluginsList = await env.PLUGIN_BUCKET.list({ prefix: `${author}/` });
-								for (const plugin of pluginsList.objects) {
-									const pluginParts = plugin.key.split('/');
-									if (pluginParts.length === 3 && pluginParts[2].endsWith('.json')) {
-										const pluginSlug = pluginParts[1];
-										const httpsPluginUrl = `https://${domain}/directory/${author}/${pluginSlug}`;
-										const httpPluginUrl = `http://${domain}/directory/${author}/${pluginSlug}`;
+								const worldsList = await env.WORLD_BUCKET.list({ prefix: `${author}/` });
+								for (const world of worldsList.objects) {
+									const worldParts = world.key.split('/');
+									if (worldParts.length === 3 && worldParts[2].endsWith('.json')) {
+										const worldFinalName = worldParts[1];
+										const httpsWorldUrl = `https://${domain}/directory/${author}/${worldFinalName}`;
+										const httpWorldUrl = `http://${domain}/directory/${author}/${worldFinalName}`;
 
-										await cache.delete(httpsPluginUrl);
-										await cache.delete(httpPluginUrl);
-										clearedKeys.push(httpsPluginUrl, httpPluginUrl);
+										await cache.delete(httpsWorldUrl);
+										await cache.delete(httpWorldUrl);
+										clearedKeys.push(httpsWorldUrl, httpWorldUrl);
 									}
 								}
 							}
@@ -1581,8 +1037,6 @@ export default {
 						// For non-wildcard patterns, clear both HTTP and HTTPS versions
 						const httpsKey = `https://${domain}${pattern}`;
 						const httpKey = `http://${domain}${pattern}`;
-						// remote the root key as it is not needed.
-						await cache.delete(`https://${request.headers.get('host')}/`);
 						await cache.delete(httpsKey);
 						await cache.delete(httpKey);
 						clearedKeys.push(httpsKey, httpKey);
@@ -1592,7 +1046,8 @@ export default {
 
 			return new Response(JSON.stringify({
 				success: true,
-				message: 'Cache cleared successfully'
+				message: 'Cache cleared successfully',
+				clearedKeys
 			}), {
 				status: 200,
 				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
@@ -1651,8 +1106,8 @@ export default {
 
 				// 2. Delete from PluginRegistryDO
 				(async () => {
-					const registryId = env.PLUGIN_REGISTRY.idFromName("global");
-					const registry = env.PLUGIN_REGISTRY.get(registryId);
+					const registryId = env.WORLD_REGISTRY.idFromName("global");
+					const registry = env.WORLD_REGISTRY.get(registryId);
 					const response = await registry.fetch(new Request('http://internal/delete-author', {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
@@ -1669,9 +1124,9 @@ export default {
 				// 3. Delete files from bucket
 				(async () => {
 					const prefix = `${username}/`;
-					const files = await env.PLUGIN_BUCKET.list({ prefix });
+					const files = await env.WORLD_BUCKET.list({ prefix });
 					const deletionResults = await Promise.all(
-						files.objects.map(file => env.PLUGIN_BUCKET.delete(file.key))
+						files.objects.map(file => env.WORLD_BUCKET.delete(file.key))
 					);
 					return { deletedFiles: files.objects.length };
 				})()
@@ -1716,13 +1171,730 @@ export default {
 		}
 	},
 
+	async handleWorldUpload(request, env) {
+		try {
+			const { userId, worldName, htmlData, preview } = await request.json();
+
+			// Auth check
+			const authHeader = request.headers.get('Authorization');
+			if (!authHeader) {
+				return new Response(JSON.stringify({
+					error: 'Missing Authorization header'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+			const [, apiKey] = authHeader.split(' ');
+
+			// Verify API key and username match
+			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
+			if (!isValid) {
+				return new Response(JSON.stringify({
+					error: 'Unauthorized: Invalid API key or username mismatch'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+
+			const sanitizedWorldName = worldName.replace(/\s/g, '-');
+			const folderName = `${userId}`;
+			const htmlKey = `${folderName}/${sanitizedWorldName}/${sanitizedWorldName}.html`;
+
+			// Store HTML content
+			await env.WORLD_BUCKET.put(htmlKey, htmlData, {
+				httpMetadata: {
+					contentType: 'text/html',
+				},
+			});
+
+			// Store preview image if provided
+			if (preview) {
+				const previewKey = `${folderName}/${sanitizedWorldName}/preview.jpg`;
+				const previewBuffer = Buffer.from(preview.split(',')[1], 'base64');
+				await env.WORLD_BUCKET.put(previewKey, previewBuffer, {
+					httpMetadata: {
+						contentType: 'image/jpeg',
+					},
+				});
+			}
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'World uploaded successfully',
+				htmlUrl: htmlKey,
+				previewUrl: preview ? `${folderName}/${sanitizedWorldName}/preview.jpg` : null
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+			});
+		} catch (error) {
+			console.error('World upload error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+			});
+		}
+	},
+
+	async handleWorldMetadata(request, env) {
+		try {
+			const { userId, worldName, metadata } = await request.json();
+
+			// Auth check
+			const authHeader = request.headers.get('Authorization');
+			if (!authHeader) {
+				return new Response(JSON.stringify({
+					error: 'Missing Authorization header'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+			const [, apiKey] = authHeader.split(' ');
+
+			// Verify API key and username match
+			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
+			if (!isValid) {
+				return new Response(JSON.stringify({
+					error: 'Unauthorized: Invalid API key or username mismatch'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+
+			const sanitizedWorldName = worldName.replace(/\s/g, '-');
+			const folderName = `${userId}`;
+			const metadataKey = `${folderName}/${sanitizedWorldName}/metadata.json`;
+
+			// Process metadata with correct path formatting
+			let processedMetadata = {
+				name: worldName,
+				slug: sanitizedWorldName,
+				author: userId,
+				created_at: new Date().toISOString(),
+				updated_at: new Date().toISOString(),
+				version: metadata.version || '1.0.0',
+				entry_point: metadata.entry_point || '0,0,0',
+				visibility: metadata.visibility || 'public',
+				capacity: metadata.capacity || 100,
+				html_url: `${folderName}/${sanitizedWorldName}/${sanitizedWorldName}.html`,
+				preview_image: `${folderName}/${sanitizedWorldName}/preview.jpg`,
+				content_rating: metadata.content_rating || 'everyone',
+				short_description: metadata.short_description || '',
+				long_description: metadata.long_description || '',
+				tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+				properties: metadata.properties || null
+			};
+
+			console.log('Processed metadata:', processedMetadata);
+
+			// Store metadata in R2
+			await env.WORLD_BUCKET.put(metadataKey, JSON.stringify([processedMetadata]), {
+				httpMetadata: {
+					contentType: 'application/json',
+				},
+			});
+
+			// Update SQLite database via WorldRegistryDO
+			const id = env.WORLD_REGISTRY.idFromName("global");
+			const registry = env.WORLD_REGISTRY.get(id);
+
+			const updateRequest = new Request('http://internal/create-world', {
+				method: 'POST',
+				body: JSON.stringify(processedMetadata)
+			});
+
+			const updateResponse = await registry.fetch(updateRequest);
+			if (!updateResponse.ok) {
+				const errorText = await updateResponse.text();
+				console.error('Failed to update SQLite database:', errorText);
+				throw new Error(`Database update failed: ${errorText}`);
+			}
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'World metadata updated successfully',
+				metadata: processedMetadata
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+			});
+		} catch (error) {
+			console.error('Metadata update error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+			});
+		}
+	},
+
+
+	async handleGetWorldData(request, env) {  // Updated version of handleGetPluginData
+		try {
+			const url = new URL(request.url);
+			const author = url.searchParams.get('author');
+			const slug = url.searchParams.get('slug');
+
+			if (!author || !slug) {
+				return new Response(JSON.stringify({ error: 'Missing parameters' }), {
+					status: 400,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			const metadataKey = `${author}/${slug}/metadata.json`;
+			const worldData = await env.WORLD_BUCKET.get(metadataKey);
+
+			if (!worldData) {
+				return new Response(JSON.stringify({ error: 'World not found' }), {
+					status: 404,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			return new Response(await worldData.text(), {
+				status: 200,
+				headers: { ...CORS_HEADERS }
+			});
+		} catch (error) {
+			console.error('Get world data error:', error);
+			return new Response(JSON.stringify({ error: 'Internal server error' }), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+	async handleGetWorld(request, env) {
+		try {
+			const url = new URL(request.url);
+			const author = url.searchParams.get('author');
+			const slug = url.searchParams.get('slug');
+
+			if (!author || !slug) {
+				return new Response(JSON.stringify({
+					error: 'Missing author or slug parameter'
+				}), {
+					status: 400,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+
+			// Record visit if not disabled
+			const trackVisit = url.searchParams.get('track') !== 'false';
+			if (trackVisit) {
+				// Get DO instance
+				const id = env.WORLD_REGISTRY.idFromName("global");
+				const registry = env.WORLD_REGISTRY.get(id);
+
+				await registry.fetch(new Request('http://internal/record-visit', {
+					method: 'POST',
+					body: JSON.stringify({ author, slug })
+				}));
+			}
+
+			// Get and return the HTML file
+			const htmlKey = `${author}/${slug}/${slug}.html`;
+			const htmlObject = await env.WORLD_BUCKET.get(htmlKey);
+
+			if (!htmlObject) {
+				return new Response(JSON.stringify({ error: 'World not found' }), {
+					status: 404,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+
+			// Add security headers for iframes, etc.
+			const securityHeaders = {
+				...CORS_HEADERS,
+				'Content-Type': 'text/html',
+				'Content-Security-Policy': [
+					"default-src 'self'",
+					"script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
+					"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+					"img-src 'self' data: blob: https:",
+					"connect-src 'self' wss: https:",
+					"frame-src 'self' https:",
+					"worker-src 'self' blob:",
+					"font-src 'self' https://cdn.jsdelivr.net"
+				].join('; '),
+				'X-Frame-Options': 'SAMEORIGIN',
+				'X-Content-Type-Options': 'nosniff'
+			};
+
+			return new Response(htmlObject.body, {
+				status: 200,
+				headers: securityHeaders
+			});
+		} catch (error) {
+			console.error('World fetch error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+			});
+		}
+	},
+
+	async handleUpdateActiveUsers(request, env) {
+		try {
+			const { author, slug, count } = await request.json();
+
+			if (!author || !slug || typeof count !== 'number') {
+				return new Response(JSON.stringify({
+					error: 'Missing required parameters'
+				}), {
+					status: 400,
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+			}
+
+			// Update active users count in registry
+			const id = env.WORLD_REGISTRY.idFromName("global");
+			const registry = env.WORLD_REGISTRY.get(id);
+
+			await registry.fetch(new Request('http://internal/update-active-users', {
+				method: 'POST',
+				body: JSON.stringify({ author, slug, count })
+			}));
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'Active users count updated'
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+			});
+		} catch (error) {
+			console.error('Active users update error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+			});
+		}
+	},
+
+	async handleGetCharacterDirectory(request, env) {
+		const url = new URL(request.url);
+		const pathParts = url.pathname.split('/').filter(part => part !== '');
+
+		if (pathParts.length !== 3 || pathParts[0] !== 'characters') {
+			return new Response('Invalid URL format', { status: 400 });
+		}
+
+		const author = pathParts[1];
+		const characterName = pathParts[2];
+
+		// Check cache first
+		const cacheKey = `character:${author}:${characterName}`;
+		const cache = caches.default;
+		let response = await cache.match(request);
+
+		if (!response) {
+			try {
+				// Get character data from the registry
+				const id = env.CHARACTER_REGISTRY.idFromName("global");
+				const registry = env.CHARACTER_REGISTRY.get(id);
+
+				const characterResponse = await registry.fetch(new Request('http://internal/get-character', {
+					method: 'POST',
+					body: JSON.stringify({ author, name: characterName })
+				}));
+
+				if (!characterResponse.ok) {
+					return new Response('Character not found', { status: 404 });
+				}
+
+				const characterData = await characterResponse.json();
+
+				// Get author data to include with character
+				const authorData = await this.fetchAuthorData(author, env);
+				characterData.authorData = authorData;
+
+				response = await generateCharacterHTML(characterData, env);
+
+				// Cache the response
+				response.headers.set('Cache-Control', 'public, max-age=3600');
+				await cache.put(request, response.clone());
+			} catch (error) {
+				console.error('Error generating character page:', error);
+				return new Response('Internal Server Error', { status: 500 });
+			}
+		}
+
+		return response;
+	},
+	async handleGetAuthorCharacters(request, env) {
+		try {
+			const url = new URL(request.url);
+			const author = url.searchParams.get('author');
+
+			if (!author) {
+				return new Response(JSON.stringify({ error: 'Missing author parameter' }), {
+					status: 400,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			// Check cache first
+			const cacheKey = `author-characters:${author}`;
+			const cache = caches.default;
+			let response = await cache.match(request);
+
+			if (!response) {
+				const id = env.CHARACTER_REGISTRY.idFromName("global");
+				const registry = env.CHARACTER_REGISTRY.get(id);
+
+				const characterResponse = await registry.fetch(new Request('http://internal/get-author-characters', {
+					method: 'POST',
+					body: JSON.stringify({ author })
+				}));
+
+				if (!characterResponse.ok) {
+					throw new Error(`Failed to fetch characters: ${await characterResponse.text()}`);
+				}
+
+				const characters = await characterResponse.json();
+
+				response = new Response(JSON.stringify(characters), {
+					headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+				});
+
+				// Cache the response
+				response.headers.set('Cache-Control', 'public, max-age=3600');
+				await cache.put(request, response.clone());
+			}
+
+			return response;
+		} catch (error) {
+			console.error('Get author characters error:', error);
+			return new Response(JSON.stringify({ error: 'Internal server error' }), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+	async handleGetCharacterData(request, env) {
+		try {
+			const url = new URL(request.url);
+			const author = url.searchParams.get('author');
+			const name = url.searchParams.get('name');
+
+			if (!author || !name) {
+				return new Response(JSON.stringify({ error: 'Missing parameters' }), {
+					status: 400,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			// Get character data from the registry
+			const id = env.CHARACTER_REGISTRY.idFromName("global");
+			const registry = env.CHARACTER_REGISTRY.get(id);
+
+			const response = await registry.fetch(new Request('http://internal/get-character', {
+				method: 'POST',
+				body: JSON.stringify({ author, name })
+			}));
+
+			if (!response.ok) {
+				return new Response(JSON.stringify({ error: 'Character not found' }), {
+					status: 404,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			return new Response(await response.text(), {
+				status: 200,
+				headers: { ...CORS_HEADERS }
+			});
+		} catch (error) {
+			console.error('Get character data error:', error);
+			return new Response(JSON.stringify({ error: 'Internal server error' }), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+	async handleCharacterUpload(request, env) {
+		try {
+			const { userId, character } = await request.json();
+			console.log('Received upload request for character:', { userId, characterName: character.name });
+
+			// Auth check
+			const authHeader = request.headers.get('Authorization');
+			if (!authHeader) {
+				console.log('Missing Authorization header');
+				return new Response(JSON.stringify({
+					error: 'Missing Authorization header'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+			const [, apiKey] = authHeader.split(' ');
+
+			// Verify API key and username match
+			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
+			console.log('API key verification result:', isValid);
+			if (!isValid) {
+				return new Response(JSON.stringify({
+					error: 'Unauthorized: Invalid API key or username mismatch'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			// Get DO instance
+			const id = env.CHARACTER_REGISTRY.idFromName("global");
+			const registry = env.CHARACTER_REGISTRY.get(id);
+			console.log('Got CHARACTER_REGISTRY DO instance');
+
+			// Create/update character
+			console.log('Sending create request to DO');
+			const response = await registry.fetch(new Request('http://internal/create-character', {
+				method: 'POST',
+				body: JSON.stringify({
+					author: userId,
+					character
+				})
+			}));
+
+			console.log('DO response status:', response.status);
+			const responseText = await response.text();
+			console.log('DO response text:', responseText);
+
+			if (!response.ok) {
+				throw new Error(`Failed to create character: ${responseText}`);
+			}
+
+			// Clear cache for this character
+			const cache = caches.default;
+			const cacheKey = `https://${request.headers.get('host')}/characters/${userId}/${character.name}`;
+			console.log('Clearing cache for:', cacheKey);
+			await cache.delete(cacheKey);
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'Character uploaded successfully'
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS }
+			});
+		} catch (error) {
+			console.error('Character upload error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+	async handleCharacterUpdate(request, env) {
+		try {
+			const { userId, character } = await request.json();
+
+			// Auth check
+			const authHeader = request.headers.get('Authorization');
+			if (!authHeader) {
+				return new Response(JSON.stringify({
+					error: 'Missing Authorization header'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+			const [, apiKey] = authHeader.split(' ');
+
+			// Verify API key and username match
+			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
+			if (!isValid) {
+				return new Response(JSON.stringify({
+					error: 'Unauthorized: Invalid API key or username mismatch'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			// Get DO instance
+			const id = env.CHARACTER_REGISTRY.idFromName("global");
+			const registry = env.CHARACTER_REGISTRY.get(id);
+
+			// Update character
+			const response = await registry.fetch(new Request('http://internal/update-character', {
+				method: 'POST',
+				body: JSON.stringify({
+					author: userId,
+					character: {
+						...character,
+						updated_at: new Date().toISOString()
+					}
+				})
+			}));
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				throw new Error(`Failed to update character: ${errorText}`);
+			}
+
+			// Clear cache for this character
+			const cache = caches.default;
+			await cache.delete(`https://${request.headers.get('host')}/characters/${userId}/${character.name}`);
+			await cache.delete(`https://${request.headers.get('host')}/character-data?author=${userId}&name=${character.name}`);
+			await cache.delete(`https://${request.headers.get('host')}/author-characters?author=${userId}`);
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'Character updated successfully'
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS }
+			});
+		} catch (error) {
+			console.error('Character update error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+	async handleDeleteCharacter(request, env) {
+		try {
+			const { userId, characterName } = await request.json();
+
+			// Auth check
+			const authHeader = request.headers.get('Authorization');
+			if (!authHeader) {
+				return new Response(JSON.stringify({
+					error: 'Missing Authorization header'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+			const [, apiKey] = authHeader.split(' ');
+
+			// Verify API key and username match
+			const isValid = await this.verifyApiKeyAndUsername(apiKey, userId, env);
+			if (!isValid) {
+				return new Response(JSON.stringify({
+					error: 'Unauthorized: Invalid API key or username mismatch'
+				}), {
+					status: 401,
+					headers: { ...CORS_HEADERS }
+				});
+			}
+
+			// Get DO instance
+			const id = env.CHARACTER_REGISTRY.idFromName("global");
+			const registry = env.CHARACTER_REGISTRY.get(id);
+
+			// Delete character
+			const response = await registry.fetch(new Request('http://internal/delete-character', {
+				method: 'POST',
+				body: JSON.stringify({
+					author: userId,
+					name: characterName
+				})
+			}));
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				throw new Error(`Failed to delete character: ${errorText}`);
+			}
+
+			// Clear caches
+			const cache = caches.default;
+			await cache.delete(`https://${request.headers.get('host')}/characters/${userId}/${characterName}`);
+			await cache.delete(`https://${request.headers.get('host')}/character-data?author=${userId}&name=${characterName}`);
+			await cache.delete(`https://${request.headers.get('host')}/author-characters?author=${userId}`);
+
+			return new Response(JSON.stringify({
+				success: true,
+				message: 'Character deleted successfully'
+			}), {
+				status: 200,
+				headers: { ...CORS_HEADERS }
+			});
+		} catch (error) {
+			console.error('Character delete error:', error);
+			return new Response(JSON.stringify({
+				error: 'Internal server error',
+				details: error.message
+			}), {
+				status: 500,
+				headers: { ...CORS_HEADERS }
+			});
+		}
+	},
+
+
+	async handleCharacterSchemaMigration(request, env) {
+		try {
+		  // Get DO instance
+		  const id = env.CHARACTER_REGISTRY.idFromName("global");
+		  const registry = env.CHARACTER_REGISTRY.get(id);
+	  
+		  // Trigger migration
+		  const response = await registry.fetch(new Request('http://internal/migrate-schema', {
+			method: 'POST'
+		  }));
+	  
+		  if (!response.ok) {
+			const errorText = await response.text();
+			throw new Error(`Migration failed: ${errorText}`);
+		  }
+	  
+		  return new Response(JSON.stringify({
+			success: true,
+			message: 'Character schema migration completed successfully'
+		  }), {
+			status: 200,
+			headers: { ...CORS_HEADERS }
+		  });
+		} catch (error) {
+		  console.error('Character schema migration error:', error);
+		  return new Response(JSON.stringify({
+			error: 'Internal server error',
+			details: error.message
+		  }), {
+			status: 500,
+			headers: { ...CORS_HEADERS }
+		  });
+		}
+	  },
+	  
 	async fetch(request, env) {
 		const url = new URL(request.url);
 		const path = url.pathname;
 
 		// Get DO instance (one global instance for the registry)
-		const id = env.PLUGIN_REGISTRY.idFromName("global");
-		const registry = env.PLUGIN_REGISTRY.get(id);
+		const id = env.WORLD_REGISTRY.idFromName("global");
+		const registry = env.WORLD_REGISTRY.get(id);
 
 		// Special case for user creation - doesn't require API key auth
 		if (path === '/create-user' && request.method === "POST") {
@@ -1771,17 +1943,17 @@ export default {
 					case '/': {
 						return this.handleHomepage(request, env);
 					}
-					case '/download': {
-						return this.handleDownload(request, env);
-					}
 					case '/clear-cache': {
 						return this.handleClearCacheGet(request, env);
 					}
-					case '/download-count': {
-						return this.getDownloadCount(request, env);
+					case '/get-world': {
+						return await this.handleGetWorld(request, env);
 					}
-					case '/plugin-data': {
-						return this.handleGetPluginData(request, env);
+					case 'get-world-data': {
+						return await this.handleGetWorldData(request, env);
+					}
+					case '/world-data': {
+						return this.handleGetWorldData(request, env);
 					}
 					case '/author-data': {
 						return this.handleGetAuthorData(request, env);
@@ -1792,11 +1964,8 @@ export default {
 					case '/version-check': {
 						return this.handleVersionCheck(request, env);
 					}
-					case '/activate': {
-						return this.handleActivation(request, env);
-					}
-					case '/activation-count': {
-						return this.getActivationCount(request, env);
+					case '/visit-count': {
+						return this.getVisitCount(request, env);
 					}
 					case '/register': {
 						return generateRegisterHTML();
@@ -1837,10 +2006,19 @@ export default {
 					case '/directory/search': {
 						return this.handleSearchResultsPage(request, env);
 					}
+					case '/character-data': {
+						return this.handleGetCharacterData(request, env);
+					}
+					case '/author-characters': {
+						return this.handleGetAuthorCharacters(request, env);
+					}
 					default: {
 						// Handle directory and author paths that need path parameter extraction
 						if (path.startsWith('/directory/') && path.split('/').length === 4) {
-							return this.handleGetPluginDirectory(request, env);
+							return this.handleGetWorldDirectory(request, env);
+						}
+						if (path.startsWith('/characters/') && path.split('/').length === 4) {
+							return this.handleGetCharacterDirectory(request, env);
 						}
 						if (path.startsWith('/author/') && path.split('/').length === 3) {
 							return this.handleGetAuthorDirectory(request, env);
@@ -1897,10 +2075,10 @@ export default {
 							});
 						}
 					}
-					case '/delete-plugin': {
+					case '/delete-world': {
 						try {
-							const { authorName, pluginName } = await request.json();
-							const response = await removePlugin(authorName, pluginName, env);
+							const { authorName, worldName } = await request.json();
+							const response = await removeWorld(authorName, worldName, env);
 							return new Response(JSON.stringify(response), {
 								status: response.success ? 200 : 400,
 								headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
@@ -1908,7 +2086,7 @@ export default {
 						} catch (error) {
 							return new Response(JSON.stringify({
 								success: false,
-								message: 'Failed to delete plugin'
+								message: 'Failed to delete world'
 							}), {
 								status: 500,
 								headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
@@ -1984,8 +2162,8 @@ export default {
 						}
 					}
 					case '/migrate-authors': {
-						const id = env.PLUGIN_REGISTRY.idFromName("global");
-						const registry = env.PLUGIN_REGISTRY.get(id);
+						const id = env.WORLD_REGISTRY.idFromName("global");
+						const registry = env.WORLD_REGISTRY.get(id);
 
 						const migrateRequest = new Request('http://internal/migrate-authors', {
 							method: 'POST'
@@ -1997,7 +2175,7 @@ export default {
 							headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
 						});
 					}
-					case '/record-download': {
+					case '/record-visit': {
 						const author = url.searchParams.get('author');
 						const slug = url.searchParams.get('slug');
 
@@ -2014,26 +2192,38 @@ export default {
 						});
 						return await registry.fetch(downloadRequest);
 					}
-					case '/upload-plugin': {
-						return this.handlePluginUpload(request, env);
+					case '/migrate-character-schema': {
+						return await this.handleCharacterSchemaMigration(request, env);
+					  }					  
+					case '/upload-character': {
+						return this.handleCharacterUpload(request, env);
 					}
-					case '/plugin-upload-chunk': {
-						return this.handlePluginUploadChunk(request, env);
+					case '/update-character': {
+						return await this.handleCharacterUpdate(request, env);
 					}
-					case '/plugin-upload-json': {
-						return this.handleUploadJson(request, env);
+					case '/delete-character': {
+						return await this.handleDeleteCharacter(request, env);
 					}
-					case '/plugin-upload-assets': {
+					case '/upload-world': {
+						return await this.handleWorldUpload(request, env);
+					}
+					case 'update-world': {
+						return await this.handleWorldMetadata(request, env);
+					}
+					case '/world-metadata': {
+						return await this.handleWorldMetadata(request, env);
+					}
+					case '/update-active-users': {
+						return await this.handleUpdateActiveUsers(request, env);
+					}
+					case '/world-upload-assets': {
 						return this.handleUploadAsset(request, env);
-					}
-					case '/plugin-upload-complete': {
-						return this.handleFinalizeUpload(request, env);
 					}
 					case '/update-author-info': {
 						return this.handleUpdateAuthorInfo(request, env);
 					}
-					case '/backup-plugin': {
-						return this.handleBackupPlugin(request, env);
+					case '/backup-world': {
+						return this.handleBackupWorld(request, env);
 					}
 					case '/clear-cache': {
 						return this.handleClearCache(request, env);

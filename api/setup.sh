@@ -47,20 +47,20 @@ roll_api_key_and_redeploy() {
 update_env_file() {
     local api_key=$1
     local worker_url=${2:-""}  # Make worker_url optional with empty default
-    local env_file="${HOME}/.plugin-publisher"
+    local env_file="${HOME}/.world-publisher"
     
     echo "Creating environment file at: $env_file"
     
     # Create or update the environment file
     cat > "$env_file" << EOL
-# Plugin Publisher Configuration
+# World Publisher Configuration
 # Generated on $(date)
 
 # API Key for authentication
 API_KEY=$api_key
 
 # Worker API URL
-PLUGIN_API_URL=$worker_url
+WORLD_API_URL=$worker_url
 
 # R2 Bucket URL (needs to be manually configured)
 # Please set this URL after making your R2 bucket public
@@ -100,14 +100,14 @@ if [ "$1" == "--roll-api-key" ]; then
 fi
 
 # Check if wrangler is installed
-if ! command -v wrangler &> /dev/null
+if ! command -v npx wrangler &> /dev/null
 then
     echo "Wrangler is not installed. Please install it first."
     echo "You can install it using: npm install -g wrangler"
     exit 1
 fi
 
-echo "Welcome to the Plugin Publishing System Setup!"
+echo "Welcome to the World Publishing System Setup!"
 echo "This script will set up the necessary resources and configure your environment."
 
 # Get project name
@@ -115,16 +115,23 @@ read -p "Enter a name for your project: " project_name
 
 # Get account ID
 echo "Fetching your account information..."
-account_info=$(wrangler whoami 2>&1)
+account_info=$(npx wrangler whoami 2>&1)
 
-# Extract account information
+# Initialize arrays for account names and IDs
 account_names=()
 account_ids=()
+
+# Read the output line by line
 while IFS= read -r line; do
-    if [[ $line =~ \|[[:space:]]+(.*)[[:space:]]+\|[[:space:]]+(.*)[[:space:]]+\| ]]; then
+    # Look for lines containing account info between │ characters
+    if [[ $line =~ │[[:space:]]*([^│]+)[[:space:]]*│[[:space:]]*([a-f0-9]{32})[[:space:]]*│ ]]; then
         name="${BASH_REMATCH[1]}"
         id="${BASH_REMATCH[2]}"
-        if [[ $name != "Account Name" ]]; then  # Skip the header line
+        # Skip the header line and empty lines
+        if [[ $name != "Account Name" ]] && [[ -n "${name// }" ]]; then
+            # Remove leading/trailing whitespace without xargs
+            name=$(echo "$name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            id=$(echo "$id" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             account_names+=("$name")
             account_ids+=("$id")
         fi
@@ -159,33 +166,36 @@ fi
 # Get current date for compatibility_date
 current_date=$(date +%Y-%m-%d)
 
+# Create temporary wrangler.toml for KV namespace creation
+echo "Creating temporary wrangler.toml for namespace creation..."
+cat > wrangler.toml << EOL
+name = "$project_name"
+account_id = "$account_id"
+EOL
+
 # Create KV namespaces
-echo "Creating KV namespaces..."
-echo "Creating DOWNLOAD_COUNTS namespace..."
-download_counts_output=$(npx wrangler kv:namespace create "DOWNLOAD_COUNTS" 2>&1)
-if [[ $download_counts_output == *"Error"* ]]; then
-    echo "Error creating DOWNLOAD_COUNTS namespace: $download_counts_output"
+echo "Creating KV namespace..."
+echo "Creating VISIT_COUNTS namespace..."
+VISIT_COUNTS_output=$(npx wrangler kv:namespace create "VISIT_COUNTS" 2>&1)
+if [[ $VISIT_COUNTS_output == *"Error"* ]]; then
+    echo "Error creating VISIT_COUNTS namespace: $VISIT_COUNTS_output"
     exit 1
 fi
-download_counts_id=$(echo "$download_counts_output" | grep -o 'id = "[^"]*"' | cut -d'"' -f2)
 
-echo "Creating DOWNLOAD_QUEUE namespace..."
-download_queue_output=$(npx wrangler kv:namespace create "DOWNLOAD_QUEUE" 2>&1)
-if [[ $download_queue_output == *"Error"* ]]; then
-    echo "Error creating DOWNLOAD_QUEUE namespace: $download_queue_output"
+# Updated pattern to match the new output format
+VISIT_COUNTS_id=$(echo "$VISIT_COUNTS_output" | grep 'id = "' | sed 's/.*id = "\([^"]*\)".*/\1/')
+
+if [ -z "$VISIT_COUNTS_id" ]; then
+    echo "Error: Failed to extract VISIT_COUNTS ID"
+    echo "Debug output: $VISIT_COUNTS_output"
     exit 1
 fi
-download_queue_output_id=$(echo "$download_queue_output" | grep -o 'id = "[^"]*"' | cut -d'"' -f2)
 
-echo "Creating DOWNLOAD_RATELIMIT namespace..."
-download_ratelimit_output=$(npx wrangler kv:namespace create "DOWNLOAD_RATELIMIT" 2>&1)
-if [[ $download_ratelimit_output == *"Error"* ]]; then
-    echo "Error creating DOWNLOAD_RATELIMIT namespace: $download_ratelimit_output"
-    exit 1
-fi
-download_ratelimit_id=$(echo "$download_ratelimit_output" | grep -o 'id = "[^"]*"' | cut -d'"' -f2)
+echo "Successfully created VISIT_COUNTS namespace with ID: $VISIT_COUNTS_id"
 
-# Create or update wrangler.toml
+# Create wrangler.toml with correct format
+echo "Creating/Updating wrangler.toml..."
+# Create wrangler.toml with correct format
 echo "Creating/Updating wrangler.toml..."
 cat > wrangler.toml << EOL
 name = "$project_name"
@@ -195,9 +205,7 @@ compatibility_flags = ["nodejs_compat"]
 account_id = "$account_id"
 
 kv_namespaces = [
-  { binding = "DOWNLOAD_COUNTS", id = "$download_counts_id", preview_id = "$download_counts_id" },
-  { binding = "DOWNLOAD_RATELIMIT", id = "$download_ratelimit_id", preview_id = "$download_ratelimit_id" }
-  { binding = "DOWNLOAD_QUEUE", id = "$download_queue_output_id", preview_id = "$download_queue_output_id" }
+    { binding = "VISIT_COUNTS", id = "$VISIT_COUNTS_id" }
 ]
 
 [observability]
@@ -207,20 +215,28 @@ head_sampling_rate = 1
 [triggers]
 crons = ["*/5 * * * *"]
 
-durable_objects.bindings = [
-  { name = "PLUGIN_REGISTRY", class_name = "PluginRegistryDO" },
-  { name = "USER_AUTH", class_name = "UserAuthDO" } 
-]
+[[durable_objects.bindings]]
+name = "WORLD_REGISTRY"
+class_name = "WorldRegistryDO"
+
+[[durable_objects.bindings]]
+name = "USER_AUTH"
+class_name = "UserAuthDO"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["PluginRegistryDO"]
+new_sqlite_classes = ["WorldRegistryDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["UserAuthDO"]
 
 [vars]
-PLUGIN_BUCKET_URL = ""
+ENVIRONMENT = "production"
+WORLD_BUCKET_URL = ""
 
 [[r2_buckets]]
-binding = "PLUGIN_BUCKET"
+binding = "WORLD_BUCKET"
 bucket_name = "${project_name}-bucket"
 preview_bucket_name = "${project_name}-bucket-preview"
 
@@ -228,7 +244,8 @@ preview_bucket_name = "${project_name}-bucket-preview"
 vars = { ENVIRONMENT = "production" }
 EOL
 
-# Create R2 bucket
+echo "Created final wrangler.toml with KV namespace ID: $VISIT_COUNTS_id"
+
 echo "Creating R2 bucket..."
 output=$(npx wrangler r2 bucket create "${project_name}-bucket" 2>&1)
 if [[ $output != *"Created bucket"* ]]; then
@@ -239,23 +256,32 @@ echo "R2 bucket created successfully."
 
 # Set CORS rules for the R2 bucket
 echo "Setting CORS rules for the R2 bucket..."
-if [ -f "./cors-rules.json" ]; then
-    output=$(npx wrangler r2 bucket cors put "${project_name}-bucket" --rules ./cors-rules.json 2>&1)
-    if [[ $output == *"Error"* ]]; then
-        echo "Error setting CORS rules: $output"
-        exit 1
-    fi
-    echo "CORS rules set successfully."
-else
-    echo "Warning: cors-rules.json file not found. Skipping CORS configuration."
+cat > cors-rules.json << EOL
+{
+  "cors_rules": [
+    {
+      "allowed_origins": ["*"],
+      "allowed_methods": ["GET", "HEAD", "POST", "PUT", "DELETE"],
+      "allowed_headers": ["*"],
+      "max_age_seconds": 3600
+    }
+  ]
+}
+EOL
+
+output=$(npx wrangler r2 bucket cors put "${project_name}-bucket" --rules ./cors-rules.json 2>&1)
+if [[ $output == *"Error"* ]]; then
+    echo "Error setting CORS rules: $output"
+    exit 1
 fi
+echo "CORS rules set successfully."
 
 # Create domain for R2 bucket
 custom_domain="${project_name}.${account_id}.r2.cloudflarestorage.com"
 echo "Your R2 bucket domain is: $custom_domain"
 
 # Update wrangler.toml with domain
-sed -i.bak "s|PLUGIN_BUCKET_URL = \"\"|PLUGIN_BUCKET_URL = \"https://$custom_domain\"|" wrangler.toml
+sed -i.bak "s|WORLD_BUCKET_URL = \"\"|WORLD_BUCKET_URL = \"https://$custom_domain\"|" wrangler.toml
 rm wrangler.toml.bak
 
 # Generate API secret
@@ -272,40 +298,16 @@ if [[ $output == *"Error"* ]]; then
 fi
 echo "Worker deployed successfully."
 
-# Set API secret
-echo "Setting API secret..."
+# Set secrets
+echo "Setting secrets..."
 echo "$api_secret" | npx wrangler secret put API_SECRET > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-	echo "Error setting API secret."
-	exit 1
-fi
-echo "API secret set successfully."
-
-# Generate a secure random master salt (64 hex characters)
 user_key_salt=$(openssl rand -hex 32)
-echo "Generated master salt: $user_key_salt"
-
-# Set the secrets
 echo "$user_key_salt" | npx wrangler secret put USER_KEY_SALT > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-	echo "Error setting USER_KEY_SALT."
-	exit 1
-fi
-echo "USER_KEY_SALT set successfully."
 
-# Prompt user to set a default invite code
 read -p "Enter a default invite code: " invite_code
-
-echo "Generated invite code: $invite_code"
-
 echo "$invite_code" | npx wrangler secret put INVITE_CODE > /dev/null 2>&1
-if [ $? -ne 0 ]; then
-	echo "Error setting INVITE_CODE."
-	exit 1
-fi
-echo "INVITE_CODE set successfully."
 
-# Deploy worker again to ensure latest changes
+# Deploy worker again
 echo "Redeploying worker to ensure latest changes..."
 output=$(npx wrangler deploy 2>&1)
 if [[ $output == *"Error"* ]]; then
@@ -315,22 +317,17 @@ fi
 echo "Worker redeployed successfully."
 
 worker_url=$(get_worker_url "$project_name")
-# Always call update_env_file, even if worker_url is empty
 update_env_file "$api_secret" "$worker_url"
-if [ -z "$worker_url" ]; then
-    echo "Warning: Could not determine worker URL automatically."
-    echo "Please manually update the PLUGIN_API_URL in ~/.plugin-publisher"
-fi
 
-echo "Setup complete! Your plugin publishing system is now deployed."
+echo "Setup complete! Your world publishing system is now deployed."
 echo "R2 Bucket URL: https://$custom_domain"
 echo "API Secret: $api_secret"
 echo ""
 echo "Next steps:"
 echo "1. Your worker code in src/worker.js has been deployed."
-echo "2. Environment configuration has been created at ~/.plugin-publisher"
+echo "2. Environment configuration has been created at ~/.world-publisher"
 echo "3. IMPORTANT: Make your R2 bucket public through the Cloudflare dashboard"
-echo "4. Update the BUCKET_URL in ~/.plugin-publisher with your public R2 URL"
+echo "4. Update the BUCKET_URL in ~/.world-publisher with your public R2 URL"
 echo "5. If you need to make changes, edit src/worker.js and run 'npx wrangler deploy' to update."
 echo "6. To roll the API key and redeploy, run this script with the --roll-api-key argument."
-echo "7. Start using your plugin publishing system!"
+echo "7. Start publishing your virtual worlds!"

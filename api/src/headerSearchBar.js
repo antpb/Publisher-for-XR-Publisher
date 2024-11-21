@@ -1,5 +1,5 @@
 
-const mainLogo = 'https://pub-2ef6bc2ae372488daf94a858e2b752ac.r2.dev/main-logo.png';
+const mainLogo = 'https://xrpublisher.com/wp-content/uploads/2024/10/xrpublisher-logo-300x70.png';
 const logoMarkup = `<a href="/" class="mr-4"><img src="${mainLogo}" alt="Logo" class="h-8"></a>`;
 
 export function createHeaderSearchBar(currentQuery = '', tags = [], request) {
@@ -15,7 +15,7 @@ export function createHeaderSearchBar(currentQuery = '', tags = [], request) {
 		return escape[match];
 	});
 
-	const mainLogo = 'https://pub-2ef6bc2ae372488daf94a858e2b752ac.r2.dev/main-logo.png';
+	const mainLogo = 'https://xrpublisher.com/wp-content/uploads/2024/10/xrpublisher-logo-300x70.png';
 	const logoMarkup = `<a href="/" class="mr-4"><img src="${mainLogo}" alt="Logo" class="h-8"></a>`;
 
 	return `
@@ -27,7 +27,7 @@ export function createHeaderSearchBar(currentQuery = '', tags = [], request) {
 					type="search" 
 					name="q" 
 					value="${safeQuery}"
-					placeholder="Search plugins..."
+					placeholder="Search worlds..."
 					class="w-full px-4 py-2 rounded-lg bg-gray-800 text-md text-white border border-gray-700 focus:outline-none focus:border-purple-500"
 				>
 				<button 

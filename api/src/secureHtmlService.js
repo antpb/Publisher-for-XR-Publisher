@@ -7,31 +7,32 @@ class SecureHtmlService {
 
 	getSecurityHeaders(nonce) {
 		return {
-		  'Content-Security-Policy': [
-			// Allow resources from same origin and CDN
-			"default-src 'self' https://cdn.jsdelivr.net",
-			// Allow scripts from CDN and playground domains
-			`script-src 'self' 'nonce-${nonce}' https://cdn.jsdelivr.net https://playground.xr.foundation`,
-			// Allow styles from CDN and inline styles
-			"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-			// Allow images from any HTTPS source
-			"img-src 'self' https: data:",
-			// Allow fonts from CDN
-			"font-src 'self' https://cdn.jsdelivr.net",
-			// Allow framing for playground
-			"frame-src 'self' https://playground.xr.foundation",
-			// Allow connections to playground
-			"connect-src 'self' https://playground.xr.foundation",
-			// Basic security headers
-			"base-uri 'self'"
-		  ].join('; '),
-		  'X-Content-Type-Options': 'nosniff',
-		  'X-Frame-Options': 'SAMEORIGIN',  // Changed from DENY to allow our iframe
-		  'Referrer-Policy': 'strict-origin-when-cross-origin'
+			'Content-Security-Policy': [
+				// Allow resources from same origin and CDN
+				"default-src 'self' https://cdn.jsdelivr.net https://builds.sxp.digital https://items.sxp.digital https://unpkg.com",
+				// Allow scripts and our web components
+				`script-src 'self' 'nonce-${nonce}' 'unsafe-eval' https://cdn.jsdelivr.net https://builds.sxp.digital https://unpkg.com`,
+				"worker-src 'self' blob:",
+				// Allow styles from CDN and inline styles (needed for web components)
+				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+				// Allow images from any HTTPS source
+				"img-src 'self' https: data: blob:",
+				// Allow fonts from CDN
+				"font-src 'self' https://cdn.jsdelivr.net",
+				// Allow custom elements
+				`script-src-elem 'self' 'nonce-${nonce}' blob: https://cdn.jsdelivr.net https://builds.sxp.digital https://unpkg.com`,
+				// Allow connections (needed for any real-time features)
+				"connect-src 'self' wss: https: blob:",
+				// Basic security headers
+				"base-uri 'self'"
+			].join('; '),
+			'X-Content-Type-Options': 'nosniff',
+			'X-Frame-Options': 'SAMEORIGIN',
+			'Referrer-Policy': 'strict-origin-when-cross-origin'
 		};
-	  }
+	}
 
-	  sanitizeText(text) {
+	sanitizeText(text) {
 		if (!text) return '';
 		return String(text)
 			.replace(/&/g, '&amp;')
@@ -68,25 +69,17 @@ class SecureHtmlService {
 		return {
 			element: (element) => {
 				if (element.tagName === 'script') {
-					// Allow scripts from allowed domains
 					const src = element.getAttribute('src');
 					if (src && (
 						src.includes('cdn.jsdelivr.net') ||
 						src.includes('playground.wordpress.net') ||
-						src.includes('playground.xr.foundation') // Add our custom playground domain
+						src.includes('playground.xr.foundation') ||
+						src.includes('builds.sxp.digital') ||
+						src.includes('unpkg.com')
 					)) {
 						element.setAttribute('nonce', nonce);
 						return;
 					}
-
-					// Allow our playground initialization script
-					if (element.hasAttribute('data-playground-init') ||
-						element.getAttribute('type') === 'module') {  // Allow module scripts for playground
-						element.setAttribute('nonce', nonce);
-						return;
-					}
-
-					// Remove other scripts
 					element.remove();
 				}
 			}
@@ -129,6 +122,68 @@ class SecureHtmlService {
 			.on('script', this.createScriptTransformer(nonce))
 			.on('a', this.createLinkTransformer())
 			.transform(response);
+	}
+
+	sanitizeCharacterData(character) {
+		if (!character) return null;
+
+		return {
+			name: this.sanitizeText(character.name),
+			modelProvider: this.sanitizeText(character.modelProvider || 'LLAMALOCAL'),
+			bio: this.sanitizeText(character.bio),
+			author: this.sanitizeText(character.author),
+			lore: Array.isArray(character.lore)
+				? character.lore.map(item => this.sanitizeText(item))
+				: [],
+			messageExamples: Array.isArray(character.messageExamples)
+				? character.messageExamples.map(conversation => {
+					if (!Array.isArray(conversation)) return [];
+					return conversation.map(message => ({
+						user: this.sanitizeText(message.user),
+						content: {
+							text: this.sanitizeText(message.content?.text || '')
+						}
+					}));
+				})
+				: [],
+			postExamples: Array.isArray(character.postExamples)
+				? character.postExamples.map(post => this.sanitizeText(post))
+				: [],
+			topics: Array.isArray(character.topics)
+				? character.topics.map(topic => this.sanitizeText(topic))
+				: [],
+			style: character.style ? {
+				all: Array.isArray(character.style.all)
+					? character.style.all.map(style => this.sanitizeText(style))
+					: [],
+				chat: Array.isArray(character.style.chat)
+					? character.style.chat.map(style => this.sanitizeText(style))
+					: [],
+				post: Array.isArray(character.style.post)
+					? character.style.post.map(style => this.sanitizeText(style))
+					: []
+			} : {
+				all: [],
+				chat: [],
+				post: []
+			},
+			adjectives: Array.isArray(character.adjectives)
+				? character.adjectives.map(adj => this.sanitizeText(adj))
+				: [],
+			settings: character.settings ? {
+				model: this.sanitizeText(character.settings.model || ''),
+				voice: {
+					model: this.sanitizeText(character.settings.voice?.model || '')
+				}
+			} : {
+				model: '',
+				voice: { model: '' }
+			},
+			vrmUrl: this.sanitizeUrl(character.vrmUrl),
+			created_at: this.sanitizeText(character.created_at),
+			updated_at: this.sanitizeText(character.updated_at),
+			authorData: character.authorData ? this.sanitizeAuthorData(character.authorData) : null
+		};
 	}
 
 	sanitizePluginData(plugin) {
@@ -178,11 +233,10 @@ class SecureHtmlService {
 				author.plugins.map(plugin => this.sanitizePluginData(plugin)) : []
 		};
 	}
-	// Add this new method to handle HTML content
+
 	sanitizeHtml(html) {
 		if (!html) return '';
 
-		// First decode any HTML entities in the input
 		const decoded = html.replace(/&amp;/g, '&')
 			.replace(/&lt;/g, '<')
 			.replace(/&gt;/g, '>')
@@ -190,8 +244,9 @@ class SecureHtmlService {
 			.replace(/&#x27;/g, "'")
 			.replace(/&#x2F;/g, "/");
 
-		// Define allowed tags and their allowed attributes
+		// Extended allowed tags to include our web components
 		const allowedTags = {
+			// Standard HTML tags
 			'p': [],
 			'h1': [],
 			'h2': [],
@@ -207,29 +262,61 @@ class SecureHtmlService {
 			'li': [],
 			'a': ['href', 'title', 'target'],
 			'code': [],
-			'pre': []
+			'pre': [],
+			// 3D World Web Components
+			'three-environment-block': [
+				'class',
+				'devicetarget',
+				'threeobjecturl',
+				'scale',
+				'positiony',
+				'rotationy',
+				'animations',
+				'camcollisions'
+			],
+			'three-spawn-point-block': [
+				'class',
+				'positionx',
+				'positiony',
+				'positionz',
+				'rotationx',
+				'rotationy',
+				'rotationz'
+			],
+			'three-model-block': [
+				'class',
+				'threeobjecturl',
+				'scalex',
+				'scaley',
+				'scalez',
+				'positionx',
+				'positiony',
+				'positionz',
+				'rotationx',
+				'rotationy',
+				'rotationz',
+				'animations',
+				'collidable',
+				'alt'
+			]
 		};
 
-		// Simple HTML parser/sanitizer
+		// Use the same sanitization logic but with our extended allowedTags
 		return decoded.replace(/<[^>]*>/g, (tag) => {
-			// Parse tag name and attributes
-			const matches = tag.match(/<\/?([a-z0-9]+)(.*?)\/?\s*>/i);
+			const matches = tag.match(/<\/?([a-z0-9\-]+)(.*?)\/?\s*>/i);
 			if (!matches) return '';
 
 			const tagName = matches[1].toLowerCase();
 			const attrs = matches[2];
 
-			// Check if tag is allowed
 			if (!allowedTags[tagName]) {
 				return '';
 			}
 
-			// For closing tags, just return them if the tag is allowed
 			if (tag.startsWith('</')) {
 				return `</${tagName}>`;
 			}
 
-			// Parse and sanitize attributes
 			let sanitizedAttrs = '';
 			if (attrs) {
 				const allowedAttrs = allowedTags[tagName];
@@ -239,7 +326,6 @@ class SecureHtmlService {
 						const [name, value] = attr.split('=');
 						const cleanName = name.toLowerCase();
 						if (allowedAttrs.includes(cleanName)) {
-							// For hrefs, ensure they're safe URLs
 							if (cleanName === 'href') {
 								const sanitizedUrl = this.sanitizeUrl(value.slice(1, -1));
 								if (sanitizedUrl) {
@@ -256,7 +342,29 @@ class SecureHtmlService {
 			return `<${tagName}${sanitizedAttrs}>`;
 		});
 	}
-
+	sanitizeWorldData(world) {
+		if (!world) return null;
+		return {
+			name: this.sanitizeText(world.name),
+			slug: this.sanitizeText(world.slug),
+			short_description: this.sanitizeText(world.short_description),
+			long_description: this.sanitizeText(world.long_description),
+			version: this.sanitizeText(world.version),
+			preview_image: this.sanitizeUrl(world.preview_image || '/images/default-preview.jpg'),
+			html_url: this.sanitizeUrl(world.html_url),
+			entry_point: this.sanitizeText(world.entry_point || '0,0,0'),
+			visibility: this.sanitizeText(world.visibility || 'public'),
+			capacity: parseInt(world.capacity) || 100,
+			visit_count: parseInt(world.visit_count) || 0,
+			active_users: parseInt(world.active_users) || 0,
+			content_rating: this.sanitizeText(world.content_rating || 'everyone'),
+			author: this.sanitizeText(world.author),
+			html_content: this.sanitizeHtml(world.html_content),
+			created_at: this.sanitizeText(world.created_at),
+			updated_at: this.sanitizeText(world.updated_at),
+			authorData: world.authorData ? this.sanitizeAuthorData(world.authorData) : null
+		};
+	}
 }
 
 

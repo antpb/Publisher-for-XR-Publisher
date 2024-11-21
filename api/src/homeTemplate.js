@@ -1,14 +1,14 @@
 import { createHeaderSearchBar } from './headerSearchBar';
 
 export default async function generateHomeHTML(authors, env) {
-	const mainLogo = 'https://pub-2ef6bc2ae372488daf94a858e2b752ac.r2.dev/main-logo.png';
+    const mainLogo = 'https://xrpublisher.com/wp-content/uploads/2024/10/xrpublisher-logo-300x70.png';
 
-	const html = `
+    const html = `
     <!DOCTYPE html>
     <html lang="en">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <head>
-        <title>Plugin Publisher - Discover Amazing Plugins</title>
+        <title>World Publisher - Discover Amazing Virtual Worlds</title>
         <link 
             href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" 
             rel="stylesheet"
@@ -23,20 +23,21 @@ export default async function generateHomeHTML(authors, env) {
     </head>
     <body>
         <div class="min-h-screen bg-[#191919] text-white">
-			${createHeaderSearchBar()}
-            <!-- Hero section with search -->
-            <div class="bg-gradient-to-r from-purple-500 to-purple-900 py-32">
+            ${createHeaderSearchBar()}
+            
+            <!-- Hero section -->
+            <div class="bg-gradient-to-r from-purple-500 to-blue-500 py-32">
                 <div class="container mx-auto px-4 text-center">
-					<a href="/" class="mr-4 justify-center flex items-center">
-					<img src="${mainLogo}" alt="Logo" style="max-height: 150px; width: auto; margin-bottom: 20px;">
-					</a>
-                    <p class="text-xl mb-8">Find the perfect plugin for your needs from a curated collection.</p>
+                    <a href="/" class="mr-4 justify-center flex items-center">
+                        <img src="${mainLogo}" alt="Logo" style="max-height: 150px; width: auto; margin-bottom: 20px;">
+                    </a>
+                    <p class="text-xl mb-8">Explore virtual worlds created by talented builders across the metaverse.</p>
                     <div class="max-w-3xl mx-auto">
                         <form action="/directory/search" method="GET" class="flex gap-2" autocomplete="off">
                             <input 
                                 type="text" 
                                 name="q" 
-                                placeholder="Search plugins..." 
+                                placeholder="Search worlds..." 
                                 class="flex-1 px-6 py-3 rounded-lg bg-white bg-opacity-20 text-white placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-white"
                             >
                             <button 
@@ -50,10 +51,10 @@ export default async function generateHomeHTML(authors, env) {
                 </div>
             </div>
 
-            <!-- Featured Authors Section -->
+            <!-- Featured Creators Section -->
             <div class="container mx-auto px-4 py-16">
                 <div class="authors-list-container rounded-3xl shadow-3xl p-8">
-                    <h2 class="text-2xl font-bold mb-8">Featured Authors</h2>
+                    <h2 class="text-2xl font-bold mb-8">Featured Creators</h2>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
                         ${authors.map(author => `
                             <div class="bg-gradient-to-br asset-card-container-home rounded-xl shadow-2xl p-6">
@@ -61,14 +62,14 @@ export default async function generateHomeHTML(authors, env) {
                                     <img 
                                         src="${author.avatar_url || '/images/default-avatar.jpg'}" 
                                         alt="${author.username}" 
-                                        class="w-28 h-28 rounded-full"
+                                        class="w-28 h-28 rounded-full object-cover"
                                     >
                                     <div class="ml-4">
                                         <h3 class="text-xl font-bold">${author.username}</h3>
-                                        <p class="text-sm text-gray-300">Member since ${new Date(author.member_since).toLocaleDateString()}</p>
+                                        <p class="text-sm text-gray-300">Creator since ${new Date(author.created_at).toLocaleDateString()}</p>
                                     </div>
                                 </div>
-                                <p class="text-gray-300 mb-4">${author.bio || ''}</p>
+                                <p class="text-gray-300 mb-4 line-clamp-3">${author.bio || ''}</p>
                                 <div class="flex gap-4 mb-4">
                                     ${author.github ? `
                                         <a href="https://github.com/${author.github}" target="_blank" rel="noopener" class="text-purple-400 hover:text-purple-300">
@@ -86,37 +87,40 @@ export default async function generateHomeHTML(authors, env) {
                                         </a>
                                     ` : ''}
                                 </div>
-                                <div class="text-sm text-gray-400">
-                                    ${author.plugin_count || 0} plugins published
+                                <div class="flex justify-between text-sm text-gray-400 mb-4">
+                                    <span>${author.world_count || 0} worlds created</span>
+                                    <span>${author.total_visits || 0} total visits</span>
                                 </div>
                                 <a href="/author/${author.username}" class="mt-4 block text-center bg-gradient-to-br from-purple-600 to-blue-500 hover:bg-gradient-to-bl text-white font-medium rounded-lg px-5 py-2.5">
-                                    View Profile
+                                    View Worlds
                                 </a>
                             </div>
                         `).join('')}
                     </div>
                 </div>
             </div>
-			        <div class="bg-black py-8">
-			<div class="container mx-auto px-4 text-center text-gray-200">
-				<p>&copy; ${new Date().getFullYear()} ${new Date().toLocaleTimeString()} Your Footer Text.</p>
-				<p>
-				<a href="/terms" class="text-purple-400 hover:underline">Terms of Service</a> | 
-				<a href="/privacy" class="text-purple-400 hover:underline">Privacy Policy</a> |
-				<a href="https://github.com/xpportal/Micro-Plugin-Publisher" class="text-purple-400 hover:underline">
-					Source Code
-				</a>
-				</p>
-			</div>
-        </div>
+
+            <!-- Footer -->
+            <div class="bg-black py-8">
+                <div class="container mx-auto px-4 text-center text-gray-200">
+                    <p>&copy; ${new Date().getFullYear()} World Publisher</p>
+                    <p>
+                        <a href="/terms" class="text-purple-400 hover:underline">Terms</a> | 
+                        <a href="/privacy" class="text-purple-400 hover:underline">Privacy</a> |
+                        <a href="https://github.com/your-repo" class="text-purple-400 hover:underline">
+                            Source
+                        </a>
+                    </p>
+                </div>
+            </div>
         </div>
     </body>
     </html>
     `;
 
-	return new Response(html, {
-		headers: {
-			'Content-Type': 'text/html',
-		},
-	});
+    return new Response(html, {
+        headers: {
+            'Content-Type': 'text/html',
+        },
+    });
 }

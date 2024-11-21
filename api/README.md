@@ -56,19 +56,19 @@ The `wrangler.toml` file in your project directory contains the configuration fo
 - `account_id`: Your Cloudflare account ID (`95d5ca589c39bf4189b080cfc8417c8e`)
 
 ### KV Namespaces
-- `DOWNLOAD_COUNTS`:
+- `VISIT_COUNTS`:
 - `DOWNLOAD_RATELIMIT`:
 - `DOWNLOAD_QUEUE`:
 
 ### Durable Objects used for Plugin Registry and Auth database.
-- `PLUGIN_REGISTRY`: Class name (`PluginRegistryDO`)
+- `WORLD_REGISTRY`: Class name (`PluginRegistryDO`)
 - `USER_AUTH`: Class name (`UserAuthDO`)
 
 ### Variables
-- `PLUGIN_BUCKET_URL`: The URL of your R2 bucket
+- `WORLD_BUCKET_URL`: The URL of your R2 bucket
 
 ### R2 Buckets
-- `PLUGIN_BUCKET`: Bucket name for plugin storage
+- `WORLD_BUCKET`: Bucket name for plugin storage
 
 ## Usage
 
@@ -84,7 +84,7 @@ The Plugin Publishing System provides the following endpoints:
 - `/version-check`: Compare new version against author/slug/slug.json
 - `/download`: Download a plugin file
 - `/download-count`: Get download count for a plugin
-- `/search`: Search plugins with optional tag filtering
+- `/search`: Search worlds with optional tag filtering
 - `/directory/search`: Get HTML search results page
 - `/activate`: Record plugin activation
 - `/activation-count`: Get activation count for a plugin
@@ -364,7 +364,7 @@ To enable the SQLite functionality, your `wrangler.toml` needs:
 
 ```toml
 [[durable_objects.bindings]]
-name = "PLUGIN_REGISTRY"
+name = "WORLD_REGISTRY"
 class_name = "PluginRegistryDO"
 
 [[migrations]]

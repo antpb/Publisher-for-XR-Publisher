@@ -598,7 +598,7 @@
       "items": [
         {
           "type": "http",
-          "name": "Search Plugins",
+          "name": "Search worlds",
           "seq": 1,
           "request": {
             "url": "{{baseUrl}}/search?q={{searchQuery}}&tag={{tag}}&limit={{limit}}&offset={{offset}}",
